@@ -5,11 +5,18 @@ import { apiGet, type AlertOut } from "../api/client";
 export default function CaseReview() {
   const { id } = useParams();
   const [alert, setAlert] = useState<AlertOut | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    if (id) apiGet<AlertOut>(`/api/alerts/${id}`).then(setAlert).catch(() => setAlert(null));
+    if (id) {
+      setError(false);
+      apiGet<AlertOut>(`/api/alerts/${id}`)
+        .then(setAlert)
+        .catch(() => setError(true));
+    }
   }, [id]);
 
+  if (error) return <p className="text-red-600">Could not load this case.</p>;
   if (!alert) return <p className="text-slate-500">Loading case…</p>;
 
   return (
