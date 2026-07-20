@@ -24,6 +24,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="alert not found")
         return alert
 
+    import os
+    from pathlib import Path
+    from fastapi.staticfiles import StaticFiles
+
+    dist = os.environ.get("FRONTEND_DIST")
+    if dist and Path(dist, "index.html").exists():
+        app.mount("/", StaticFiles(directory=dist, html=True), name="spa")
+
     return app
 
 
