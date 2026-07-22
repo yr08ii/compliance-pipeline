@@ -1,1 +1,14 @@
-# compliance-pipeline
+# compliance monitoring platform
+
+Local, self-contained compliance transaction-monitoring platform.
+
+## Run locally
+
+1. Start Postgres. Either a native local instance (`brew services start postgresql@16`, with a `compliance` role/database) or `make db` (needs Docker Engine/Podman). Point `DATABASE_URL` at whichever you use.
+2. Apply migrations: `make backend-migrate`
+3. Seed data and run the pipeline: `make seed-run`
+4. Build the frontend: `make frontend`
+5. Serve everything: `make serve`
+6. Open http://localhost:8000 to view the alert queue, then click Review to see the divergence panel.
+
+See `docs/superpowers/specs/2026-07-20-compliance-platform-design.md` for the full design.
