@@ -1,101 +1,156 @@
 @import "tailwindcss";
 
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
+  --text: #544d60;
+  --text-h: #11101a;
+  --bg: #f6f4ef;
+  --surface: rgba(255, 255, 255, 0.82);
+  --surface-strong: #ffffff;
+  --border: rgba(17, 16, 26, 0.08);
+  --border-strong: rgba(17, 16, 26, 0.14);
+  --code-bg: #f0ece3;
+  --accent: #6f3df4;
+  --accent-bg: rgba(111, 61, 244, 0.12);
+  --accent-border: rgba(111, 61, 244, 0.34);
+  --success: #0f9b6a;
+  --warning: #c47a1c;
+  --danger: #b03a3a;
   --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+    0 28px 70px rgba(17, 16, 26, 0.08), 0 8px 24px rgba(17, 16, 26, 0.05);
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --heading: Georgia, "Times New Roman", serif;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
+  font: 16px/1.55 var(--sans);
+  letter-spacing: 0.01em;
+  color-scheme: light;
   color: var(--text);
-  background: var(--bg);
+  background:
+    radial-gradient(circle at top left, rgba(111, 61, 244, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(15, 155, 106, 0.08), transparent 24%),
+    linear-gradient(180deg, #faf8f3 0%, #f2efe9 100%);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
   @media (max-width: 1024px) {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
+    font-size: 15px;
   }
 }
 
 body {
   margin: 0;
+  min-width: 320px;
+  background: var(--bg);
+}
+
+html {
+  color-scheme: light;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(17, 16, 26, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(17, 16, 26, 0.03) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.7), transparent 90%);
+  opacity: 0.45;
 }
 
 h1,
 h2 {
   font-family: var(--heading);
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-h);
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
+  font-size: 3.2rem;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  margin: 0;
+
   @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
+    font-size: 2.3rem;
   }
 }
+
 h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
+  font-size: 1.7rem;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  margin: 0;
+
   @media (max-width: 1024px) {
-    font-size: 20px;
+    font-size: 1.35rem;
   }
 }
+
 p {
   margin: 0;
 }
 
-code,
-.counter {
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+code {
   font-family: var(--mono);
   display: inline-flex;
   border-radius: 4px;
   color: var(--text-h);
-}
-
-code {
   font-size: 15px;
   line-height: 135%;
   padding: 4px 8px;
   background: var(--code-bg);
+}
+
+.glass-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.soft-panel {
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+
+.nav-chip {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease,
+    transform 160ms ease;
+}
+
+.nav-chip:hover {
+  transform: translateX(1px);
+}
+
+.nav-chip:focus-visible,
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(111, 61, 244, 0.18), 0 0 0 1px rgba(111, 61, 244, 0.45);
+}
+
+.metric-number {
+  font-variant-numeric: tabular-nums;
+}
+
+.text-balance {
+  text-wrap: balance;
 }
