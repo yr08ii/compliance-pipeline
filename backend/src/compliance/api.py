@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
@@ -26,11 +27,22 @@ def create_app() -> FastAPI:
 
     import os
     from pathlib import Path
-    from fastapi.staticfiles import StaticFiles
 
     dist = os.environ.get("FRONTEND_DIST")
-    if dist and Path(dist, "index.html").exists():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="spa")
+    if dist:
+        dist_path = Path(dist)
+        index_path = dist_path / "index.html"
+        if index_path.exists():
+
+            @app.get("/{path:path}")
+            def spa(path: str = "") -> FileResponse:
+                if path.startswith("api/") or path == "api":
+                    raise HTTPException(status_code=404, detail="not found")
+
+                asset_path = dist_path / path
+                if path and asset_path.is_file():
+                    return FileResponse(asset_path)
+                return FileResponse(index_path)
 
     return app
 

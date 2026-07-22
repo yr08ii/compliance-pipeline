@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.python-version
+
+# Node / frontend
+node_modules/
+dist/
+
+# Local env
+.env
+
+# SDD scratch (progress ledger, briefs, review packages)
+.superpowers/

@@ -20,3 +20,14 @@ def test_spa_served_when_dist_exists(tmp_path, monkeypatch):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "app" in resp.text
+
+
+def test_spa_deep_link_served_when_dist_exists(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>app</title>")
+    monkeypatch.setenv("FRONTEND_DIST", str(dist))
+    client = TestClient(create_app())
+    resp = client.get("/queue")
+    assert resp.status_code == 200
+    assert "app" in resp.text

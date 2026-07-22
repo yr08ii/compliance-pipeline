@@ -1,24 +1,25 @@
 from prefect import flow, task
+from prefect.cache_policies import NO_CACHE
 from sqlalchemy.orm import Session
 from compliance.pipeline import stages
 
 
-@task
+@task(cache_policy=NO_CACHE)
 def _profile(session: Session) -> None:
     stages.profile(session)
 
 
-@task
+@task(cache_policy=NO_CACHE)
 def _route(session: Session) -> dict[str, str]:
     return stages.route(session)
 
 
-@task
+@task(cache_policy=NO_CACHE)
 def _detect(session: Session, lanes: dict[str, str]) -> list[dict]:
     return stages.detect(session, lanes)
 
 
-@task
+@task(cache_policy=NO_CACHE)
 def _score(session: Session, hits: list[dict]) -> int:
     return len(stages.score_and_rank(session, hits))
 
