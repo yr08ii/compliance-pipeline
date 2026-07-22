@@ -27,7 +27,8 @@ class Transaction(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_txn_id: Mapped[str] = mapped_column(String, unique=True, index=True)  # idempotent pull key
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.merchant_id"), index=True)
-    amount: Mapped[float] = mapped_column(Float)
+    total_amount: Mapped[float] = mapped_column(Float)  # gross value moved — the detection signal
+    net_amount: Mapped[float | None] = mapped_column(Float, default=None)  # after fees
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     is_refund: Mapped[bool] = mapped_column(Boolean, default=False)
     terminal_id: Mapped[str | None] = mapped_column(String, default=None)

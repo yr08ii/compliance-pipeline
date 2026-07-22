@@ -21,7 +21,7 @@ def profile(session: Session) -> None:
         session.delete(stale)
     session.flush()
     for m in session.scalars(select(Merchant)):
-        amounts = [t.amount for t in session.scalars(
+        amounts = [t.total_amount for t in session.scalars(
             select(Transaction).where(Transaction.merchant_id == m.merchant_id))]
         daily_volume = sum(amounts)
         avg_ticket = mean(amounts) if amounts else 0.0

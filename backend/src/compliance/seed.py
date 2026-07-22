@@ -21,7 +21,8 @@ def seed(session: Session) -> None:
             session.add(Transaction(
                 source_txn_id=f"T{txn_id:05d}",
                 merchant_id=m.merchant_id,
-                amount=base_amount * (1 + 0.1 * i),
+                total_amount=base_amount * (1 + 0.1 * i),
+                net_amount=base_amount * (1 + 0.1 * i) * 0.97,
                 occurred_at=_DAY + timedelta(hours=i),
                 is_refund=(i % 7 == 0),
                 terminal_id=f"TERM-{m.merchant_id}",
