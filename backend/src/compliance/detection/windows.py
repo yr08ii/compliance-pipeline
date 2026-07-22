@@ -55,15 +55,21 @@ def fit_all_baselines(
     window_days: int,
     *,
     min_observations: int,
+    min_span_days: int = 0,
 ) -> dict[str, Baseline]:
     """Fit an amount baseline for every merchant in one pass.
+
+    Maturity is *count and elapsed days*, not count alone. A merchant trading
+    heavily for three days can clear an observation threshold while having no
+    weekly or seasonal shape at all — its "normal" is not yet a normal, and
+    scoring against it manufactures confident nonsense.
 
     Merchants with too little history are returned with an explicitly unusable
     baseline rather than omitted — the router needs to see them to send them
     down Lane B, and a silently missing merchant is a merchant nobody monitors.
     """
     rows = session.execute(
-        select(Transaction.merchant_id, Transaction.total_amount)
+        select(Transaction.merchant_id, Transaction.total_amount, Transaction.occurred_at)
         .where(
             Transaction.occurred_at >= _window_start(as_of, window_days),
             Transaction.occurred_at < as_of,
@@ -72,13 +78,24 @@ def fit_all_baselines(
         .order_by(Transaction.merchant_id, Transaction.occurred_at)
     )
 
-    by_merchant: dict[str, list[float]] = {}
-    for merchant_id, amount in rows:
-        by_merchant.setdefault(merchant_id, []).append(amount)
+    amounts: dict[str, list[float]] = {}
+    first_seen: dict[str, datetime] = {}
+    last_seen: dict[str, datetime] = {}
+    for merchant_id, amount, occurred_at in rows:
+        amounts.setdefault(merchant_id, []).append(amount)
+        first_seen.setdefault(merchant_id, occurred_at)
+        last_seen[merchant_id] = occurred_at
+
+    def _fit(merchant_id: str) -> Baseline:
+        values = amounts.get(merchant_id, [])
+        if merchant_id in first_seen:
+            span = (last_seen[merchant_id] - first_seen[merchant_id]).total_seconds() / 86400
+            if span < min_span_days:
+                # Enough transactions, not enough elapsed time.
+                return fit_baseline(values, min_observations=len(values) + 1)
+        return fit_baseline(values, min_observations=min_observations)
 
     return {
-        merchant_id: fit_baseline(
-            by_merchant.get(merchant_id, []), min_observations=min_observations
-        )
+        merchant_id: _fit(merchant_id)
         for merchant_id in session.scalars(select(Merchant.merchant_id))
     }

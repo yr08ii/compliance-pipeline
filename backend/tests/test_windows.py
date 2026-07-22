@@ -119,3 +119,33 @@ class TestFitAllBaselines:
 
         assert baselines["QUIET"].usable is False
         assert baselines["QUIET"].n == 0
+
+    def test_dense_but_brief_history_is_not_mature(self, session):
+        """Maturity is count AND elapsed days. A merchant trading heavily for
+        three days has the observation count but no weekly or seasonal shape,
+        so its 'normal' is not yet a normal."""
+        session.add(Merchant(merchant_id="BURST", mcc="5411"))
+        for day in (1, 2, 3):
+            for _ in range(8):
+                _txn(session, "BURST", 100.0, days_before=day)
+        session.flush()
+
+        baselines = fit_all_baselines(
+            session, AS_OF, WINDOW, min_observations=12, min_span_days=14
+        )
+
+        assert baselines["BURST"].usable is False
+        assert baselines["BURST"].method is DispersionMethod.INSUFFICIENT_DATA
+
+    def test_history_spanning_the_required_days_is_mature(self, session):
+        session.add(Merchant(merchant_id="SPREAD", mcc="5411"))
+        for day in range(1, 21):
+            _txn(session, "SPREAD", 90.0, days_before=day)
+            _txn(session, "SPREAD", 110.0, days_before=day)
+        session.flush()
+
+        baselines = fit_all_baselines(
+            session, AS_OF, WINDOW, min_observations=12, min_span_days=14
+        )
+
+        assert baselines["SPREAD"].usable is True
