@@ -22,6 +22,19 @@ Two design rules inherited and reaffirmed:
 - **Explainability is mandatory.** A detector that cannot say *why* in the `feature_snapshot` shape is a secondary signal, never a primary flag.
 - **The secondary model re-ranks only.** It reorders the queue; it never hides an alert. (Confirmed decision.)
 
+### 0.1 Source schema (actual columns)
+
+The pull reads these columns. Detectors reference these names, not invented ones.
+
+**Transaction-specific:** `payment_id`, `card_type`, `card_origin`, `card_issuing_country`, `card_issuing_bank`, `payment_gateway`, `currency`, `total_amount`, `net_amount`, `hkt_transaction_time`, `transaction_status`, `hashed_pan`, `masked_pan`.
+**Merchant / peer identifiers:** `merchant_id`, `agent_id`, `mcc`, `mcc_description`, `business_plan`, `business_nature`, `ownership_or_business_type`, `merchant_status`.
+**Merchant linkage (ring detection):** `hashed_merchant_name`, `hashed_br_number`, `hashed_merchant_address`.
+**Geography (peer grouping):** `city`, `merchant_area`, `merchant_district`, `merchant_subdistrict`.
+
+Two consequences for earlier assumptions:
+- **No `terminal_id`.** The skeleton's `terminal_id` column is unsupported by the source. Cross-terminal checks are really cross-*merchant* (`merchant_id`) or cross-*agent* (`agent_id`).
+- **No explicit refund flag.** Refunds are represented via `transaction_status` and/or the sign of `net_amount`/`total_amount` — confirm the exact encoding before building refund-ratio rules. The skeleton's `is_refund` boolean is a placeholder for whatever that resolves to.
+
 ---
 
 ## 1. The three detector families
@@ -87,7 +100,7 @@ Build a smooth probability density of *when* the merchant normally transacts (a 
 
 ### 3.3 Card-origin baseline — categorical
 
-Maintain the merchant's historical distribution of card *issuer countries* (derived from BIN → issuer-country lookup; **no PAN needed** for this one). A sudden surge of a rare-for-this-merchant origin is the signal. Score by how improbable the observed mix is under the historical categorical distribution.
+Maintain the merchant's historical distribution of card *issuer countries* — directly from `card_issuing_country` / `card_origin` (**already in the schema; no BIN lookup needed**). `card_issuing_bank` gives a finer cut if wanted. A sudden surge of a rare-for-this-merchant origin is the signal. Score by how improbable the observed mix is under the historical categorical distribution.
 
 `feature_snapshot`: `{feature_name: "foreign_card_share", merchant_value: 0.72, baseline_value: 0.05, deviation: <ratio or surprisal>}`.
 
@@ -115,39 +128,54 @@ New merchants have no own baseline, so — exactly as the diagram shows — they
 
 Statistical baselines do not catch patterns that are individually unremarkable. These are rules, per-lane calibrated, each emitting a reason code:
 
-| Typology | Signal (not a per-feature deviation) |
-|---|---|
-| Structuring / smurfing | clustering of amounts just under a reporting/review threshold; velocity of near-threshold txns |
-| Refund / credit abuse | high refund ratio; refunds to a *different* card than the original charge |
-| Bust-out | build-up then abrupt volume/ticket spike then refund surge / settlement pull |
-| Dormant reactivation | long inactivity → sudden high-value velocity |
-| Rapid movement | funds land and are routed out with no resting balance |
+| Typology | Signal (not a per-feature deviation) | Columns |
+|---|---|---|
+| Structuring / smurfing | clustering of amounts just under a reporting/review threshold; velocity of near-threshold txns | `total_amount`, `hkt_transaction_time` |
+| Refund / credit abuse | high refund ratio; refunds to a *different* `hashed_pan` than the original charge | `transaction_status`/`net_amount`, `hashed_pan` |
+| Bust-out | build-up then abrupt volume/ticket spike then refund surge / settlement pull | `total_amount`, time |
+| Dormant reactivation | long inactivity → sudden high-value velocity | time gaps |
+| Rapid movement | funds land and are routed out with no resting balance | `net_amount`, time |
+| **Declared-vs-actual mismatch** | `mcc` / `business_nature` inconsistent with the actual transaction pattern (ticket sizes, timing, card mix) — the *transaction-laundering* signature | `mcc`, `business_nature`, `ownership_or_business_type` |
+| **Decline-ratio spike** | high share of failed/declined authorizations at a merchant — the in-scope, merchant-side read of card-testing | `transaction_status` |
 
-These populate `triggering_detectors` with a rule name and a sub-score. Where a rule has a natural numeric basis (refund ratio), also emit a `feature_snapshot` row so the panel can show it.
+These populate `triggering_detectors` with a rule name and a sub-score. Where a rule has a natural numeric basis (refund ratio, decline ratio), also emit a `feature_snapshot` row so the panel can show it.
 
 ---
 
-## 5. Family C — cross-merchant / ring detection (hashed-PAN layer)
+## 5. Family C — cross-merchant / ring detection
 
-Enabled by the **1:1 hashed PAN** available in the source data — a stable per-card identifier that lets us trace one card across terminals *without storing the raw PAN*. This unlocks the merchant-integrity checks the per-merchant flow structurally cannot see:
+Two sub-layers, in priority order. Lead with merchant-identity linkage (cheap, in-scope, low privacy cost); the card-linkage layer is a higher-cost secondary.
 
-- **Card swarming** — one card across ≥ N terminals in a short window (ring moving through a district's merchants).
-- **Terminal hopping / collusion** — clusters of cards following the same terminal→terminal path (colluding merchants distributing synthetic sales to stay under each single-merchant radar).
-- **Cross-terminal structuring** — one card/account's aggregate split across many merchants inside 24h to dodge thresholds.
+### 5.1 Merchant-identity rings (primary — build first)
 
-These are **in scope** — they detect *merchant* coordination, our objective.
+The schema carries `hashed_merchant_name`, `hashed_br_number`, and `hashed_merchant_address`. Multiple distinct `merchant_id`s that **share** one of these are the classic shell-merchant / same-beneficial-owner ring — several "independent" storefronts behind one owner, address, or business registration, used to spread synthetic sales under each single-merchant radar.
 
-### 5.1 Security & privacy treatment (mandatory — this changes our data posture)
+- **Detection is an equality join**, not a reversal: "do these two merchants share a `hashed_br_number`?" We never un-hash anything, so the hash being reversible is irrelevant here — a decisive advantage over the card layer.
+- **Directly in scope** (merchant integrity) and **low privacy cost** — it links *merchants* to each other, which is our job, with none of the cardholder-linkage burden of §5.2.
+- **`agent_id` is the same idea one level up.** Aggregate alert rates per onboarding agent: one agent whose whole book runs hot is a gatekeeper-of-the-gatekeeper risk — a signal no per-merchant view can see.
 
-A hash that is 1:1 and joinable is deterministic and unsalted **by construction**, and an unsalted hash of a PAN is reversible: fixing the BIN and the Luhn digit leaves only ~10⁹ candidates, so a plain SHA-256 is brute-forced back to the card number in seconds (PCI SSC warns of exactly this). Therefore:
+Signals: shared `hashed_br_number` / `hashed_merchant_address` / `hashed_merchant_name` across merchant_ids; abnormal alert/True-Positive rate concentrated under one `agent_id`; a cluster of merchants sharing identity attributes that spike volume together.
 
-- The hashed PAN is **sensitive data**, not a safe token. It must be encrypted at rest, access-controlled, and excluded from the analyst-facing UI and from `feature_snapshot`. Our earlier "nothing sensitive lives here" posture must be updated to acknowledge this identifier.
-- **Prefer a keyed hash (HMAC with a secret key held separately from the data).** Still deterministic and joinable for detection; not brute-forceable without the key. The key becomes the protected secret. If the source hands us a plain hash, treat it as PAN-equivalent.
-- Building a cross-merchant map of where each cardholder transacts is **cardholder linkage** — a PDPO consideration justified by the AML purpose, but requiring access control and a documented basis. Flag for compliance/legal, like the fund-hold rules.
+These are graph signals; render the explanation as "shares registration with 4 other merchants, 2 already flagged" rather than a bare score. Standard data-protection hygiene still applies to the merchant hashes (equality-join only, access-controlled), but the stakes are far lower than cardholder data.
 
-### 5.2 What stays out
+### 5.2 Card-linkage layer (secondary — higher privacy cost)
 
-**Impossible geo-velocity** and **BIN / card-testing attacks** are now *technically* feasible with the hashed PAN, but they detect **cardholder / stolen-card fraud** — a different objective with a different owner (issuer / real-time fraud), explicitly out of scope in the platform spec. Keep them out of this pipeline; note the integration point so a fraud team can consume the same identifier. Revisit only as a deliberate scope decision.
+The **1:1 `hashed_pan`** lets us trace one card across merchants (there is no terminal id):
+
+- **Card swarming** — one `hashed_pan` across ≥ N merchants in a short window (a ring moving through a district).
+- **Cross-merchant structuring** — one card's aggregate split across many merchants inside 24h to dodge thresholds.
+
+Still merchant-integrity relevant, but it carries a real cost that §5.1 does not:
+
+**Security & privacy treatment (mandatory — this changes our data posture).** A hash that is 1:1 and joinable is deterministic and unsalted by construction, and an unsalted hash of a PAN is reversible: fix the BIN and Luhn digit and only ~10⁹ candidates remain, so a plain SHA-256 is brute-forced back to the card number in seconds (PCI SSC warns of exactly this). Therefore:
+
+- The `hashed_pan` is **sensitive data**, not a safe token: encrypt at rest, access-control, and keep it out of the analyst UI and `feature_snapshot`. Our "nothing sensitive lives here" posture must be updated to acknowledge it. (`masked_pan` is display-only and must never be treated as an identifier.)
+- **Prefer a keyed hash (HMAC, key held separately)** — still joinable for detection, not brute-forceable without the key. Open question: do we control the hashing (can switch to HMAC) or does the source hand us the hash as-is (then treat as PAN-equivalent)?
+- Building a map of where each cardholder transacts is **cardholder linkage** — a PDPO consideration justified by AML purpose but requiring access control and a documented basis. Flag for compliance/legal.
+
+### 5.3 What stays out
+
+**Impossible geo-velocity** and **BIN / card-testing attacks** are technically feasible with `hashed_pan`, but they detect **cardholder / stolen-card fraud** — a different objective and owner (issuer / real-time fraud), out of scope here. Keep them out; note the integration point so a fraud team can consume the same identifier. The merchant-side decline-ratio rule (§4) is the in-scope substitute. Revisit only as a deliberate scope decision.
 
 ---
 
@@ -174,15 +202,19 @@ Both depend on the random-control-set sampling from the plan (label a few *unfla
 
 ---
 
-## 8. Data gaps to close before build
+## 8. Data status (most gaps already closed by the schema)
+
+**Already present in the source — no work needed:** card origin (`card_issuing_country`/`card_origin`, plus `card_issuing_bank`), subdistrict geography (`city`/`merchant_area`/`merchant_district`/`merchant_subdistrict`), transaction time (`hkt_transaction_time`), merchant-linkage hashes (`hashed_br_number`/`hashed_merchant_address`/`hashed_merchant_name`), `agent_id`, `transaction_status`, `mcc`/`business_nature`. The earlier "BIN lookup" and "geo enrichment" gaps are void.
+
+**Still to do:**
 
 | Need | Status | Action |
 |---|---|---|
-| Hashed PAN in the store | not ingested (only `card_bin` today) | add ingestion; HMAC-key treatment (§5.1); encrypt + access-control |
-| BIN → issuer-country table | not present | source a BIN reference table (for card-origin baseline) — no PAN needed |
-| Subdistrict geo on merchant/terminal | only `geo="HK"` today | enrich merchant/terminal with district/subdistrict |
-| Festive calendar | not present | HK calendar (Lunar New Year, Mid-Autumn, Golden Week) — feeds the time/seasonality context so surges are understood, not flagged |
-| `peer_groups` table | deferred in skeleton | build (MCC × subdistrict cohort stats), min-cohort fallback logic |
+| Ingest the real schema | skeleton uses a 7-column subset with an invented `terminal_id` | widen the `transactions`/`merchants` model to §0.1; drop `terminal_id`; resolve refund encoding (`transaction_status`/`net_amount`) |
+| `hashed_pan` handling | present in source, not yet ingested | §5.2 treatment — HMAC (if we control hashing) or PAN-equivalent protection; encrypt + access-control; keep out of UI |
+| Festive calendar | not in schema | add HK calendar (Lunar New Year, Mid-Autumn, Golden Week) so seasonal surges are understood, not flagged |
+| `peer_groups` table | deferred in skeleton | build (MCC × subdistrict cohort stats) from existing columns; min-cohort fallback |
+| Merchant-identity ring index | not built | equality-join index on the merchant hashes + `agent_id` aggregation (§5.1) |
 
 ---
 
@@ -202,11 +234,13 @@ Every number here is a *starting point* set against synthetic data and re-tuned 
 
 ## 10. Build order (feeds the next implementation plan)
 
+0. **Ingest the real schema** (§0.1) — widen the model, drop `terminal_id`, resolve refund encoding. Prerequisite for everything below.
 1. **Robust amount baseline** (Median/MAD + modified z, with the MAD=0 and min-n guards) replacing the stub — Lane A, fully explainable, drops into the existing divergence panel.
 2. **Peer baselines** (`peer_groups` + MCC IQR) and the Lane B `Ruleset′(mcc)` cold-start path.
 3. **Time (circular KDE) and card-origin** baselines; festive-calendar context.
-4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement).
-5. **Cross-merchant / ring layer** (hashed PAN) — *after* the §5.1 security treatment (HMAC key, encryption, access control, compliance sign-off) is in place.
+4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement, declared-vs-actual mismatch, decline-ratio).
+5. **Merchant-identity rings** (§5.1) — equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation. Cheap, in-scope, no card data. Build here, not last.
 6. **Composite scoring + reasons**, then the **two feedback loops** once labels accumulate.
+7. **Card-linkage layer** (§5.2, `hashed_pan`) — *last*, and only after the security treatment (HMAC key, encryption, access control, compliance/PDPO sign-off) is in place.
 
 Each is its own spec → plan → build increment. Isolation Forest and the cardholder-fraud checks are explicitly deferred / out.
