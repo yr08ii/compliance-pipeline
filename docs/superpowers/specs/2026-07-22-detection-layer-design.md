@@ -116,6 +116,31 @@ Peer baselines require a **minimum cohort size**; a 3-merchant MCC cohort is not
 
 `peer_groups` stores `{mcc, subdistrict, n_merchants, amount_q1, amount_q3, active_hours_kde_ref, foreign_card_ratio, ...}`, refreshed nightly.
 
+### 3.4a Baseline integrity — self-contamination and backfill
+
+A baseline fitted from a merchant's own history has a structural weakness: **the baseline can learn the crime.** This section states the exposure honestly and the mitigations.
+
+**What is already handled.** The scored period is excluded from its own baseline — the window is `[as_of − N, as_of)`, `as_of` exclusive. We never compute a median that includes the value being judged.
+
+**What robust statistics buy.** The median has a **50% breakdown point**: contamination below half the window does not move the center. This is the concrete payoff of median/MAD over mean/σ, where a single fraudulent transaction shifts the baseline immediately and begins masking the next one. A merchant abusing on a minority of days does not poison its own baseline.
+
+**What remains exposed.**
+
+| Exposure | Why it bites |
+|---|---|
+| **Sustained abuse** | Past ~50% of the window, the median follows the crime and "normal" becomes the abuse. |
+| **Slow ramps** | A merchant growing a few percent a day is never an outlier against its own trailing window, yet reaches 10× in two months. **No trailing self-baseline can see this** — it is the natural evasion against this design. |
+| **Contaminated backfill** | Initial baselines fitted on months of unaudited history encode undetected crime as normal. No statistic fixes this; the ground truth does not exist yet. |
+
+**Mitigations, in priority order.**
+
+1. **Peer baselines (§3.4) are the structural answer.** A merchant's own baseline can be poisoned by its own behaviour; the MCC/subdistrict peer baseline cannot be, unless the whole cohort is criminal. Peer comparison is immune to per-merchant self-contamination — which raises the priority of §3.4 from "more coverage" to "the antidote."
+2. **Quarantine confirmed-bad periods.** Transactions belonging to an alert dispositioned `TRUE_POSITIVE` are excluded from all future baseline fitting. Without this, the system's own confirmed findings are absorbed into normal. This is a second, and arguably better, use of disposition data than model training.
+3. **Trend / level-shift detector.** Compare a short-window median (e.g. 7d) against a long-window one (e.g. 90d). A ramp appears as a level shift even when no single day breaches. This is the only detector that catches slow growth.
+4. **Optional window lag.** End the baseline window several days before the scored day so very recent activity is not instantly normalised. Costs adaptation speed — hold unless 1–3 prove insufficient.
+
+**Launch backfill.** Fitting baselines over historical data is a one-time **backfill job** (a mode of Stage 2), not a training run — it exists so merchants start in Lane A rather than every merchant sitting in Lane B for the first month. The resulting baselines are provisional by definition. They are corrected by: running in **shadow mode** first, leaning on **peer** rather than **self** comparison in the early period, and **re-fitting once the first dispositions land** (feedback Loop 2). This is why shadow mode is a requirement and not a nicety — it is the only way to validate baselines fitted on unaudited history.
+
 ### 3.5 The cold-start (new / Lane B) path
 
 New merchants have no own baseline, so — exactly as the diagram shows — they get `Ruleset′ (mcc)`: **peer-derived rules and thresholds**, not a peer anomaly *model*. The distinction matters for fairness: scoring a legitimately-unusual new merchant against a peer *model* over-flags it; applying sensible MCC-calibrated *caps* (velocity, single-ticket, refund ratio) does not pretend to know its normal. Lane B stays rule-based until it graduates.
@@ -235,8 +260,9 @@ Every number here is a *starting point* set against synthetic data and re-tuned 
 ## 10. Build order (feeds the next implementation plan)
 
 0. **Ingest the real schema** (§0.1) — widen the model, drop `terminal_id`, resolve refund encoding. Prerequisite for everything below.
-1. **Robust amount baseline** (Median/MAD + modified z, with the MAD=0 and min-n guards) replacing the stub — Lane A, fully explainable, drops into the existing divergence panel.
-2. **Peer baselines** (`peer_groups` + MCC IQR) and the Lane B `Ruleset′(mcc)` cold-start path.
+1. ~~**Robust amount baseline**~~ — **done.** Median/MAD + modified z, with the MAD=0 / min-observations / min-span guards, wired through stages 2–4.
+2. **Peer baselines** (`peer_groups` + MCC IQR) and the Lane B `Ruleset′(mcc)` cold-start path. **Priority raised** — per §3.4a, peer comparison is the structural defence against a merchant's own baseline being poisoned by its own behaviour.
+2a. **Baseline integrity work** (§3.4a): quarantine `TRUE_POSITIVE` periods from future fitting; add the short-vs-long-window trend detector; add the Stage-2 backfill mode.
 3. **Time (circular KDE) and card-origin** baselines; festive-calendar context.
 4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement, declared-vs-actual mismatch, decline-ratio).
 5. **Merchant-identity rings** (§5.1) — equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation. Cheap, in-scope, no card data. Build here, not last.
