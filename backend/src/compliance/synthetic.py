@@ -31,6 +31,8 @@ RAMP = "RAMP"  # grows a few percent daily — invisible to a self-baseline
 PEER_OUT = "PEEROUT"  # stable for itself, far above its cohort
 FLOOD = "FLOOD"  # ordinary tickets, but a sudden burst of them
 BURST = "BURST"  # ordinary daily total, all of it in minutes
+NIGHT = "NIGHT"  # a grocer trading at 3am, when grocers do not
+TOURIST = "TOURIST"  # a residential shop suddenly all foreign cards
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,14 @@ SPECS = (
     # Same number of transactions as any day, but crammed into one
     # hour. Daily volume looks normal; only the rate exposes it.
     MerchantSpec(BURST, "5944", "Central", 2900.0, 300.0, 12, 90),
+    # Trades at an hour its whole trade is shut. Its own pattern would allow
+    # it; only the cohort's hours say otherwise.
+    MerchantSpec(NIGHT, "5411", "Tin Shui Wai", 110.0, 20.0, 4, 90),
+    # A residential district is local-card territory. This one goes all
+    # foreign on the scored day.
+    MerchantSpec(TOURIST, "5411", "Tin Shui Wai", 100.0, 18.0, 5, 90),
+    MerchantSpec("LOCAL2", "5411", "Tin Shui Wai", 95.0, 15.0, 5, 90),
+    MerchantSpec("LOCAL3", "5411", "Tin Shui Wai", 105.0, 17.0, 5, 90),
 )
 
 # The injected anomaly: a ticket far outside SPIKE's own normal, on the day
@@ -103,6 +113,7 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                 merchant_id=spec.merchant_id,
                 mcc=spec.mcc,
                 registered_address=spec.subdistrict,
+                merchant_subdistrict=spec.subdistrict,
                 onboarded_at=as_of - timedelta(days=spec.history_days),
             )
         )
@@ -136,9 +147,14 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                         + (
                             timedelta(hours=10, minutes=n * 4)
                             if spec.merchant_id == BURST and day == 0
+                            else timedelta(hours=3)
+                            if spec.merchant_id == NIGHT and day == 0
                             else timedelta(hours=(9 + n) % 24)
                         ),
                         is_refund=False,
+                        card_issuing_country=(
+                            "US" if spec.merchant_id == TOURIST and day == 0 else "HK"
+                        ),
                         card_bin="457896",
                         geo=spec.subdistrict,
                     )

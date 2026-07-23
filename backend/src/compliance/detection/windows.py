@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from compliance.detection.baselines import (
     MIN_COHORT_MERCHANTS,
     MIN_COUNT_DISPERSION,
+    MIN_RATIO_DISPERSION,
     Baseline,
     PeerBaseline,
     Trend,
@@ -41,6 +42,22 @@ def _window_bounds(
     """
     end = as_of - timedelta(days=lag_days)
     return end - timedelta(days=window_days), end
+
+
+def _cohort_column(dimension: str):
+    """Which merchant attribute groups a cohort.
+
+    Trade and place are separate questions: a HKD 800 ticket is ordinary for a
+    Central restaurant and remarkable for one in Sham Shui Po, and neither is
+    visible from MCC alone. They are kept as independent dimensions rather than
+    a combined MCC-by-district key, which would shatter into cohorts too small
+    to be distributions.
+    """
+    if dimension == "mcc":
+        return Merchant.mcc
+    if dimension == "subdistrict":
+        return Merchant.merchant_subdistrict
+    raise ValueError(f"unknown cohort dimension: {dimension!r}")
 
 
 def quarantined_days(session: Session) -> set[tuple[str, date]]:
@@ -441,6 +458,7 @@ def fit_peer_transaction_baselines(
     *,
     lag_days: int = 0,
     per_merchant_cap: int = 200,
+    dimension: str = "mcc",
     exclude_quarantined: bool = True,
 ) -> dict[str, Baseline]:
     """Fit a cohort's *transaction* distribution per MCC.
@@ -455,17 +473,19 @@ def fit_peer_transaction_baselines(
     Each member's contribution is capped so a high-volume merchant cannot pull
     the cohort distribution far enough to cover its own behaviour.
     """
+    key = _cohort_column(dimension)
     start, end = _window_bounds(as_of, window_days, lag_days)
     rows = session.execute(
-        select(Merchant.mcc, Transaction.merchant_id, Transaction.total_amount,
+        select(key, Transaction.merchant_id, Transaction.total_amount,
                Transaction.occurred_at)
         .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
         .where(
+            key.is_not(None),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
             Transaction.is_refund.is_(False),
         )
-        .order_by(Merchant.mcc, Transaction.merchant_id, Transaction.occurred_at)
+        .order_by(key, Transaction.merchant_id, Transaction.occurred_at)
     )
 
     quarantined = quarantined_days(session) if exclude_quarantined else set()
@@ -485,6 +505,80 @@ def fit_peer_transaction_baselines(
         required = 1 if len(members) >= MIN_COHORT_MERCHANTS else len(pooled) + 1
         cohorts[mcc] = fit_baseline(pooled, min_observations=required)
     return cohorts
+
+
+def fit_peer_foreign_ratio_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    lag_days: int = 0,
+    dimension: str = "subdistrict",
+    home_country: str = "HK",
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit each district's normal share of foreign-issued cards.
+
+    Foreignness is not itself the signal — an airport shop sees tourists all
+    day and a residential grocer does not. What matters is a merchant sitting
+    far from the norm *for where it trades*, which only a district cohort can
+    say. One ratio per merchant, so a busy member cannot define the district.
+    """
+    from statistics import median as _median
+
+    key = _cohort_column(dimension)
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(key, Transaction.merchant_id, Transaction.card_issuing_country,
+               Transaction.occurred_at)
+        .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
+        .where(
+            key.is_not(None),
+            Transaction.card_issuing_country.is_not(None),
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    tally: dict[str, dict[str, list[int]]] = {}
+    for group, merchant_id, country, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        seen = tally.setdefault(group, {}).setdefault(merchant_id, [0, 0])
+        seen[0] += 1
+        if country != home_country:
+            seen[1] += 1
+
+    cohorts: dict[str, Baseline] = {}
+    for group, members in tally.items():
+        ratios = [foreign / total for total, foreign in members.values() if total]
+        required = 1 if len(ratios) >= MIN_COHORT_MERCHANTS else len(ratios) + 1
+        cohorts[group] = fit_baseline(
+            ratios, min_observations=required, min_dispersion=MIN_RATIO_DISPERSION
+        )
+    return cohorts
+
+
+def merchant_foreign_ratio(
+    session: Session, merchant_id: str, as_of: datetime, home_country: str = "HK"
+) -> float | None:
+    """Share of the scored day's transactions on foreign-issued cards."""
+    countries = list(
+        session.scalars(
+            select(Transaction.card_issuing_country).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= as_of,
+                Transaction.is_refund.is_(False),
+                Transaction.card_issuing_country.is_not(None),
+            )
+        )
+    )
+    if not countries:
+        return None
+    return sum(1 for c in countries if c != home_country) / len(countries)
 
 
 def fit_trend(

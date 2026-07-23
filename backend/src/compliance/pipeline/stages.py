@@ -15,8 +15,11 @@ from sqlalchemy.orm import Session
 from compliance.detection.baselines import Baseline, DispersionMethod, score_value
 from compliance.detection.profiles import (
     ActiveHours,
+    CohortHours,
     OriginMix,
     fit_active_hours,
+    fit_cohort_hours,
+    hour_is_unusual_for_cohort,
     fit_origin_mix,
     hour_is_unusual,
     origin_surprisal,
@@ -27,7 +30,9 @@ from compliance.detection.windows import (
     _peak_rate,
     fit_all_baselines,
     fit_peer_baselines,
+    fit_peer_foreign_ratio_baselines,
     fit_peer_transaction_baselines,
+    merchant_foreign_ratio,
     fit_peer_volume_baselines,
     fit_trend,
     fit_velocity_baselines,
@@ -61,6 +66,9 @@ PEER_VOLUME_DETECTOR = "count_vs_mcc_peers"
 VELOCITY_DETECTOR = "burst_rate_vs_own_baseline"
 HOUR_DETECTOR = "hour_vs_own_pattern"
 ORIGIN_DETECTOR = "card_origin_vs_own_mix"
+PEER_HOUR_DETECTOR = "hour_vs_mcc_peers"
+PEER_DISTRICT_AMOUNT_DETECTOR = "ticket_vs_subdistrict_peers"
+PEER_FOREIGN_DETECTOR = "foreign_card_ratio_vs_subdistrict"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -92,6 +100,13 @@ def profile(session: Session, *, as_of: datetime) -> None:
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
     peer_volumes = fit_peer_volume_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
+    cohort_hours = fit_cohort_hours(session, as_of, WINDOW_DAYS, LAG_DAYS)
+    district_txns = fit_peer_transaction_baselines(
+        session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS, dimension="subdistrict"
+    )
+    foreign_ratios = fit_peer_foreign_ratio_baselines(
+        session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
+    )
     velocities = fit_velocity_baselines(
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
@@ -105,6 +120,10 @@ def profile(session: Session, *, as_of: datetime) -> None:
         volume = volumes.get(merchant_id)
         velocity = velocities.get(merchant_id)
         peer_volume = peer_volumes.get(merchant.mcc) if merchant else None
+        district = merchant.merchant_subdistrict if merchant else None
+        cohort_hour = cohort_hours.get(merchant.mcc) if merchant else None
+        district_txn = district_txns.get(district) if district else None
+        foreign = foreign_ratios.get(district) if district else None
         trend = fit_trend(
             session,
             merchant_id,
@@ -154,6 +173,16 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "peer_volume_center": peer_volume.center if peer_volume else None,
                     "peer_volume_dispersion": peer_volume.dispersion if peer_volume else None,
                     "peer_volume_usable": bool(peer_volume and peer_volume.usable),
+                    "subdistrict": district,
+                    "cohort_hours_density": list(cohort_hour.density) if cohort_hour else None,
+                    "cohort_hours_usable": bool(cohort_hour and cohort_hour.usable),
+                    "cohort_hours_merchants": cohort_hour.n_merchants if cohort_hour else 0,
+                    "district_txn_center": district_txn.center if district_txn else None,
+                    "district_txn_dispersion": district_txn.dispersion if district_txn else None,
+                    "district_txn_usable": bool(district_txn and district_txn.usable),
+                    "foreign_center": foreign.center if foreign else None,
+                    "foreign_dispersion": foreign.dispersion if foreign else None,
+                    "foreign_usable": bool(foreign and foreign.usable),
                     "hours_density": list(hours.density),
                     "hours_usable": hours.usable,
                     "origin_counts": origins.counts,
@@ -378,6 +407,80 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "deviation": round(surprisal, 2),
                     },
                 })
+
+        # Cohort hours — the only thing that can call 3am odd for a merchant
+        # with no hours pattern of its own.
+        if p.metrics.get("cohort_hours_usable"):
+            ch = CohortHours(tuple(p.metrics["cohort_hours_density"]),
+                             p.metrics["cohort_hours_merchants"])
+            odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
+                   if hour_is_unusual_for_cohort(h, ch)]
+            if odd:
+                worst_hour = min(odd, key=lambda h: ch.share(h))
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_HOUR_DETECTOR,
+                    "sub_score": 0.5,
+                    "feature": {
+                        "feature_name": "hour_vs_trade_hours",
+                        "merchant_value": float(worst_hour),
+                        "baseline_value": float(max(range(24), key=ch.share)),
+                        "deviation": round(ch.share(worst_hour) * 100, 2),
+                    },
+                })
+
+        # District amount — a ticket ordinary for Central can be remarkable in
+        # Sham Shui Po, and MCC alone cannot see that.
+        if p.metrics.get("district_txn_usable") and day_amounts:
+            dist_base = Baseline(
+                center=p.metrics["district_txn_center"],
+                dispersion=p.metrics["district_txn_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["peer_merchants"],
+            )
+            worst_d = max((score_value(a, dist_base) for a in day_amounts),
+                          key=lambda s: s.deviation)
+            if worst_d.is_outlier:
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_DISTRICT_AMOUNT_DETECTOR,
+                    "sub_score": min(worst_d.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "ticket_vs_subdistrict_peers",
+                        "merchant_value": worst_d.value,
+                        "baseline_value": dist_base.center,
+                        "deviation": round(worst_d.deviation, 2),
+                    },
+                })
+
+        # Foreign-card share against the district norm. Foreignness is not the
+        # signal — an airport shop sees tourists all day; sitting far from the
+        # norm for where you trade is.
+        if p.metrics.get("foreign_usable"):
+            ratio = merchant_foreign_ratio(session, p.merchant_id, as_of)
+            if ratio is not None:
+                fbase = Baseline(
+                    center=p.metrics["foreign_center"],
+                    dispersion=p.metrics["foreign_dispersion"],
+                    method=DispersionMethod.MAD,
+                    n=p.metrics["peer_merchants"],
+                )
+                fscore = score_value(ratio, fbase)
+                if fscore.is_outlier:
+                    hits.append({
+                        "merchant_id": p.merchant_id,
+                        "lane": lanes.get(p.merchant_id, "B"),
+                        "detector": PEER_FOREIGN_DETECTOR,
+                        "sub_score": min(fscore.deviation / 10.0, 1.0),
+                        "feature": {
+                            "feature_name": "foreign_card_share_vs_district",
+                            "merchant_value": round(ratio, 3),
+                            "baseline_value": round(fbase.center, 3),
+                            "deviation": round(fscore.deviation, 2),
+                        },
+                    })
 
         # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
         # This is the one that covers cold start: a median does not move for a

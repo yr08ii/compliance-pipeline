@@ -140,6 +140,11 @@ class Trend:
 MIN_COHORT_MERCHANTS = 3
 # One transaction: the smallest meaningful spread in a daily count.
 MIN_COUNT_DISPERSION = 1.0
+# Two percentage points: the smallest difference in a share worth calling a
+# difference. A district where every merchant is 100% local has zero spread,
+# and that is exactly where a suddenly all-foreign merchant is most suspicious
+# — without a floor the detector switches itself off precisely there.
+MIN_RATIO_DISPERSION = 0.02
 RAMP_RATIO = 1.75
 
 

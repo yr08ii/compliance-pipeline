@@ -136,5 +136,6 @@ class TestEndToEnd:
         alerts = list(session.scalars(select(Alert).order_by(Alert.rank)))
         assert alerts, "no alert written"
         assert alerts[0].rank == 1
-        assert all(a.feature_snapshot[0]["baseline_value"] > 0 for a in alerts)
+        # A ratio or an hour can legitimately have a baseline of zero.
+        assert all(a.feature_snapshot[0]["baseline_value"] >= 0 for a in alerts)
         assert "SPIKE" in {a.merchant_id for a in alerts}

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -76,13 +76,23 @@ def parse_json(payload: str) -> list[dict]:
     raise ValueError("unrecognised JSON payload shape")
 
 
+# The source column is hkt_transaction_time — Hong Kong local. Hong Kong has
+# observed no DST since 1979, so a fixed offset is exact rather than an
+# approximation.
+HKT = timezone(timedelta(hours=8))
+
+
 def _parse_time(value: str) -> datetime:
-    """Source times are Hong Kong local. Stored timezone-aware so windows and
-    day boundaries are unambiguous."""
+    """Source times are Hong Kong local, and are stored as such.
+
+    Stamping them UTC would shift every transaction eight hours: day
+    boundaries would fall mid-afternoon and "trading at 3am" would mean
+    something else entirely.
+    """
     text = str(value).strip().replace("T", " ")
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text[:19], fmt).replace(tzinfo=timezone.utc)
+            return datetime.strptime(text[:19], fmt).replace(tzinfo=HKT)
         except ValueError:
             continue
     raise ValueError(f"unparseable transaction time: {value!r}")
