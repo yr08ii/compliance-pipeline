@@ -20,6 +20,8 @@ dependencies = [
 [project.scripts]
 compliance = "compliance.cli:main"
 compliance-run = "compliance.cli:main"
+compliance-backfill = "compliance.backfill:main"
+compliance-ingest = "compliance.ingest_cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.9,<0.12.0"]

@@ -13,6 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import Baseline, DispersionMethod, score_value
+from compliance.detection.profiles import (
+    ActiveHours,
+    OriginMix,
+    fit_active_hours,
+    fit_origin_mix,
+    hour_is_unusual,
+    origin_surprisal,
+    SURPRISAL_FLAG,
+)
 from compliance.detection.windows import (
     _window_bounds,
     _peak_rate,
@@ -50,6 +59,8 @@ TREND_DETECTOR = "level_shift_ramp"
 VOLUME_DETECTOR = "count_vs_own_baseline"
 PEER_VOLUME_DETECTOR = "count_vs_mcc_peers"
 VELOCITY_DETECTOR = "burst_rate_vs_own_baseline"
+HOUR_DETECTOR = "hour_vs_own_pattern"
+ORIGIN_DETECTOR = "card_origin_vs_own_mix"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -102,6 +113,8 @@ def profile(session: Session, *, as_of: datetime) -> None:
             long_days=TREND_LONG_DAYS,
             lag_days=LAG_DAYS,
         )
+        hours = fit_active_hours(session, merchant_id, as_of, WINDOW_DAYS, LAG_DAYS)
+        origins = fit_origin_mix(session, merchant_id, as_of, WINDOW_DAYS, LAG_DAYS)
         excluded = sum(1 for m, _ in quarantined if m == merchant_id)
 
         session.add(
@@ -141,6 +154,11 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "peer_volume_center": peer_volume.center if peer_volume else None,
                     "peer_volume_dispersion": peer_volume.dispersion if peer_volume else None,
                     "peer_volume_usable": bool(peer_volume and peer_volume.usable),
+                    "hours_density": list(hours.density),
+                    "hours_usable": hours.usable,
+                    "origin_counts": origins.counts,
+                    "origin_n": origins.n,
+                    "origin_usable": origins.usable,
                     "trend_ratio": round(trend.ratio, 3),
                     "trend_is_ramp": trend.is_ramp,
                 },
@@ -194,6 +212,31 @@ def _scored_day_peak_rate(
         )
     )
     return float(_peak_rate(stamps, window_minutes))
+
+
+def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> list[int]:
+    return [
+        s.hour for s in session.scalars(
+            select(Transaction.occurred_at).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= as_of,
+                Transaction.is_refund.is_(False),
+            )
+        )
+    ]
+
+
+def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> list[str]:
+    return [
+        o for o in session.scalars(
+            select(Transaction.card_issuing_country).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= as_of,
+                Transaction.is_refund.is_(False),
+                Transaction.card_issuing_country.is_not(None),
+            )
+        )
+    ]
 
 
 def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[dict]:
@@ -293,6 +336,48 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                             "deviation": round(vel_score.deviation, 2),
                         },
                     })
+
+        # When: trading at an hour this merchant never trades.
+        if p.metrics.get("hours_usable"):
+            hours = ActiveHours(tuple(p.metrics["hours_density"]), p.metrics["baseline_n"])
+            odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
+                   if hour_is_unusual(h, hours)]
+            if odd:
+                worst_hour = min(odd, key=lambda h: hours.share(h))
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": HOUR_DETECTOR,
+                    "sub_score": 0.5,
+                    "feature": {
+                        "feature_name": "transaction_hour",
+                        "merchant_value": float(worst_hour),
+                        "baseline_value": float(max(range(24), key=hours.share)),
+                        "deviation": round(hours.share(worst_hour) * 100, 2),
+                    },
+                })
+
+        # Whose cards: a shift in issuing countries. Foreignness itself is not
+        # the signal — an airport shop always sees tourists; a change is.
+        if p.metrics.get("origin_usable"):
+            mix = OriginMix(dict(p.metrics["origin_counts"]), p.metrics["origin_n"])
+            today = _scored_day_origins(session, p.merchant_id, as_of)
+            scored = [(o, origin_surprisal(o, mix)) for o in set(today)]
+            flagged = [(o, s) for o, s in scored if s > SURPRISAL_FLAG]
+            if flagged:
+                origin, surprisal = max(flagged, key=lambda pair: pair[1])
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": ORIGIN_DETECTOR,
+                    "sub_score": min(surprisal / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": f"card_origin_{origin}",
+                        "merchant_value": round(today.count(origin) / len(today), 3),
+                        "baseline_value": round(mix.share(origin), 3),
+                        "deviation": round(surprisal, 2),
+                    },
+                })
 
         # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
         # This is the one that covers cold start: a median does not move for a
