@@ -3,12 +3,12 @@ from contextlib import contextmanager
 from compliance import cli
 
 
-def test_main_seeds_and_runs_pipeline(monkeypatch, capsys):
-    calls = []
+def test_main_resets_generates_then_runs_pipeline(monkeypatch, capsys):
+    calls: list = []
 
     class FakeSession:
         def execute(self, statement) -> None:
-            calls.append(("execute", statement))
+            calls.append("execute")
 
         def commit(self) -> None:
             calls.append("commit")
@@ -17,23 +17,18 @@ def test_main_seeds_and_runs_pipeline(monkeypatch, capsys):
     def fake_session_scope():
         yield FakeSession()
 
-    def fake_seed(session) -> None:
-        calls.append(("seed", session))
-
-    def fake_run_pipeline(session) -> int:
-        calls.append(("pipeline", session))
-        return 2
-
     monkeypatch.setattr(cli, "SessionLocal", lambda: fake_session_scope())
-    monkeypatch.setattr(cli, "seed", fake_seed)
-    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(
+        cli, "generate_history", lambda session, **kw: calls.append("generate")
+    )
+    monkeypatch.setattr(
+        cli, "run_pipeline", lambda session, as_of=None: (calls.append("pipeline"), 2)[1]
+    )
 
     cli.main()
 
-    assert [kind for kind, *_ in calls[:7]] == ["execute"] * 7
-    assert calls[7] == "commit"
-    assert calls[8][0] == "seed"
-    assert calls[9] == "commit"
-    assert calls[10][0] == "pipeline"
-    assert calls[11] == "commit"
+    # every table cleared, then generate, then pipeline — each followed by a commit
+    assert calls.count("execute") == 7
+    assert calls.index("generate") < calls.index("pipeline")
+    assert calls[-1] == "commit"
     assert capsys.readouterr().out.strip() == "pipeline complete: 2 alert(s) written"

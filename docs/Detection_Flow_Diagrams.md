@@ -16,15 +16,15 @@ The whole system on one page. Automated stages run 00:00–09:00; humans work 09
 ```mermaid
 flowchart TD
     SRC[("Source database")] --> PULL["Stage 1 · Pull<br/>prior day · immutable raw store"]
-    PULL --> PROF["Stage 2 · Profile<br/>rolling windows + peer cohorts"]
+    PULL --> PROF["Stage 2 · Profile<br/>lagged windows, quarantined days,<br/>peer cohorts"]
     PROF --> ROUTE{"Stage 3 · Route<br/>mature or new?"}
 
     ROUTE -->|"mature: count AND days over threshold"| LANEA["Lane A · mature merchant"]
     ROUTE -->|"new / low-data"| LANEB["Lane B · cold start"]
 
-    LANEA --> FA["Family A<br/>Robust baselines<br/>own + peer"]
+    LANEA --> FA["Family A<br/>amount · volume · speed<br/>own + peer"]
     LANEA --> FB["Family B<br/>Typology ruleset"]
-    LANEB --> FBP["Ruleset-prime by MCC<br/>peer-derived caps only<br/>no anomaly model"]
+    LANEB --> FBP["Cohort tests + MCC caps<br/>no own baseline to score against"]
 
     FC["Family C<br/>Ring detection<br/>portfolio-wide, not per-lane"]
 
@@ -75,52 +75,67 @@ flowchart TD
 
 ## 3. Zoom · Family A — robust baselines
 
-Answers: *"is this number unusual for this merchant, or for its peers?"* Natively explainable — every output is a `feature_snapshot` row the divergence panel renders.
+Answers: *"is this unusual for this merchant, for its trade, or for where it trades?"* Twelve detectors across three frames of reference — the merchant's own history, its MCC cohort, and its district. Every one is natively explainable — each emits a `feature_snapshot` row the divergence panel renders, and all report the same modified z-score so they are comparable.
 
 ```mermaid
 flowchart TD
-    subgraph OWN["Own-history baselines · per merchant"]
-        A1["Amount<br/>Median + MAD<br/>modified Z-score"]
-        A2["Time of day<br/>circular KDE"]
-        A3["Card origin<br/>categorical distribution"]
+    subgraph OWN["Own history · is this unusual FOR THIS MERCHANT?"]
+        A1["Amount<br/>ticket vs own median"]
+        A2["Volume<br/>daily count vs own"]
+        A3["Speed<br/>peak per hour vs own"]
+        A4["Trend<br/>7d level vs 90d level"]
+        A5["When<br/>hour vs own pattern"]
+        A6["Whose cards<br/>origin vs own mix"]
     end
 
-    subgraph PEER["Peer-cohort baselines"]
-        P1["MCC amount<br/>IQR upper fence"]
-        P2["MCC time<br/>cohort active hours"]
-        P3["Subdistrict amount"]
-        P4["Subdistrict card origin<br/>foreign-card ratio"]
+    subgraph PEER["Cohort · unusual FOR THIS TRADE, or FOR THIS PLACE?"]
+        P1["Ticket vs MCC tickets<br/>works with no own history"]
+        P2["Merchant level vs MCC levels<br/>one vote per merchant"]
+        P3["Daily count vs MCC counts"]
+        P4["Hour vs MCC operating hours"]
+        P5["Ticket vs subdistrict tickets"]
+        P6["Foreign-card share vs district"]
     end
 
-    OWN --> SNAP["feature_snapshot rows<br/>feature, merchant value,<br/>baseline value, deviation"]
+    OWN --> SNAP["feature_snapshot rows<br/>feature, merchant value,<br/>baseline value, modified z"]
     PEER --> SNAP
-    SNAP --> PANEL["Divergence panel<br/>what diverged from baseline"]
+    SNAP --> PANEL["Divergence panel"]
 ```
 
-### 3a. Why robust statistics, not mean and standard deviation
+### 3a. Three measured quantities, and why all three
+
+Amount alone leaves cohort manipulation free: to drag a cohort's amount distribution you must transact far more than your peers, so without a volume detector that evasion costs nothing.
+
+| Quantity | Catches | Missed by the others |
+|---|---|---|
+| **Amount** | one large sale; wrong price level for the trade | — |
+| **Volume** | many ordinary tickets; the manipulation attempt itself | amount sees nothing — every ticket is normal |
+| **Speed** | a burst inside an ordinary daily total | volume sees nothing — the day's total is normal |
+
+Each evasion route trips a different detector, and the lag means none of them can affect the baseline currently doing the judging.
+
+### 3b. Why robust statistics, not mean and standard deviation
 
 Transaction amounts are heavily right-skewed. A few legitimate large sales inflate the mean and balloon the standard deviation, so a classic z-score baseline drifts and **under-flags**. The median cannot be moved by a handful of outliers.
 
 ```
 MAD = median( |xᵢ − x̃| )
 
-modified Z:   Mᵢ = 0.6745 · (xᵢ − x̃) / MAD
+modified z:   Mᵢ = 0.6745 · (xᵢ − x̃) / MAD
 ```
 
-### 3b. The amount detector, including the guards
-
-The two failure modes a naive implementation hides:
+### 3c. The amount detector, including the guards
 
 ```mermaid
 flowchart TD
-    S["Score today's amount"] --> N{"Enough history?"}
-    N -->|"no"| LB["Lane B rules instead"]
+    S["Score today's amount"] --> N{"Enough history?<br/>count AND elapsed days"}
+    N -->|"no"| LB["Lane B · cohort tests only"]
     N -->|"yes"| MZ{"Is MAD zero?"}
 
-    MZ -->|"no"| Z["Compute modified Z"]
+    MZ -->|"no"| Z["Compute modified z"]
     MZ -->|"yes"| IQ{"Is IQR also zero?"}
     IQ -->|"no"| SC["Fallback: scaled IQR"]
-    IQ -->|"yes · constant price merchant"| RU["Switch to rule:<br/>any change from the constant"]
+    IQ -->|"yes · constant price"| RU["Unusable · hand to a rule"]
     SC --> Z
 
     Z --> BAND{"Score band"}
@@ -129,21 +144,39 @@ flowchart TD
     BAND -->|"over 3.5"| FLAG["Outlier · contributes a flag"]
 ```
 
-> **MAD = 0 is a real trap.** A merchant selling one product at one price has zero dispersion, so the modified Z divides by zero and *every* transaction reads as infinitely anomalous — that merchant floods the queue. Never divide by a zero MAD.
+> **MAD = 0 is a real trap.** A merchant selling one product at one price has zero dispersion, so the modified z divides by zero and *every* transaction reads as infinitely anomalous. Never divide by a zero MAD.
 
-> **Time is circular.** 23:30 and 00:30 are 60 minutes apart, not 23 hours. A linear time baseline is wrong at the midnight boundary; use a circular kernel.
+> **Counts need a floor of one transaction.** A merchant trading exactly five times a day has zero spread in its *counts* — ordinary, not degenerate. Without a floor it falls to the constant fallback and a jump from five to sixty is invisible. Amounts keep the strict fallback, where zero spread genuinely does mean "fixed price".
 
-### 3c. Peer cohort fallback
+> **Time is circular.** 23:30 and 00:30 are an hour apart, not 23. A linear time baseline is wrong at midnight.
 
-Cohorts need enough members to form a distribution:
+### 3d. Baseline integrity — four defences
+
+A self-fitted baseline can learn the crime. The median tolerates contamination up to 50% of the window; past that, and against slow ramps, it needs help.
+
+```mermaid
+flowchart TD
+    RAW["Transactions in window"] --> LAG["1 · Lag<br/>window ends N days back"]
+    LAG --> QUAR["2 · Quarantine<br/>drop TRUE_POSITIVE days"]
+    QUAR --> FIT["Fit baseline"]
+    FIT --> TREND["3 · Trend<br/>short vs long level"]
+    FIT --> PEERD["4 · Peer<br/>cohort cannot be self-poisoned"]
+
+    DISP["Analyst dispositions"] -.->|"days confirmed bad"| QUAR
+```
+
+- **Lag** — the window is held back from the present. Not a tuning knob: a disposition takes days to arrive, so this is the interval in which analysts can still rule on activity *before* it becomes part of normal.
+- **Quarantine** — days confirmed `TRUE_POSITIVE` never shape a future baseline, so the system stops absorbing its own confirmed findings. Cleared days stay in; cleared means legitimate.
+- **Trend** — a short-window level against a long one. The only detector that sees a slow ramp, which is invisible to any trailing self-baseline by construction.
+- **Peer** — a merchant can poison its own baseline but not its cohort's. The structural defence, and the reason a launch can lean on cohort comparison before any history is vetted.
+
+### 3e. Peer cohort fallback
 
 ```mermaid
 flowchart LR
     C1["MCC x subdistrict"] -->|"cohort too small"| C2["MCC only"]
     C2 -->|"still too small"| C3["Network-wide"]
 ```
-
----
 
 ## 4. Zoom · Family B — typology ruleset
 
@@ -347,3 +380,10 @@ Not used for detection: `masked_pan` (display only — never an identifier), `pa
 | Added **inconclusive** as a first-class verdict | Forcing every case into true/false positive corrupts the training labels. |
 | Marked **cardholder-fraud checks out of scope** | Impossible geo-velocity and BIN testing detect stolen *cards*, not bad *merchants* — different objective, different owner. |
 | Dropped `terminal_id` | Not in the real schema. Cross-terminal checks are really cross-*merchant* or cross-*agent*. |
+| Family A grew from one quantity to **three** | Amount alone left cohort manipulation free: dragging a cohort requires volume, and nothing was watching volume. Speed then covers the burst that an ordinary daily total hides. |
+| Peer became **two** detectors | A median does not move for one large ticket, so a merchant-level cohort test cannot see a single outrageous transaction — the exact case a cold-start merchant presents, where no self baseline exists either. |
+| Peer scoring switched from Tukey IQR to **median/MAD** | IQR breaks down at 25%, so in a small cohort one deviant member lands inside the upper quartile and drags Q₃ up far enough to hide itself. |
+| Added the **four integrity defences** | A self-fitted baseline can learn the crime: lag, quarantine, trend and peer each close a different route. |
+| Added the **baseline provenance page** | What each baseline is built from, and which day joins it tonight, was invisible. |
+| Added **subdistrict** as a cohort dimension | Peer tests keyed on MCC alone. A HKD 800 ticket is ordinary for a Central restaurant and remarkable in Sham Shui Po, and foreign-card share is a property of the district, not the trade. |
+| Added **cohort operating hours** | A cold-start merchant has no hours pattern of its own, so only its trade's hours can say 3am is odd. |

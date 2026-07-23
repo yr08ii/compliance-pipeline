@@ -5,6 +5,7 @@ import AlertQueue from "./screens/AlertQueue";
 import CaseReview from "./screens/CaseReview";
 import FollowThrough from "./screens/FollowThrough";
 import ModelHealth from "./screens/ModelHealth";
+import Baselines from "./screens/Baselines";
 import { apiGet, type AlertOut } from "./api/client";
 import { cn } from "./lib/utils";
 
@@ -12,6 +13,7 @@ const nav = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/queue", label: "Alert queue" },
   { to: "/cases", label: "Case follow-through" },
+  { to: "/baselines", label: "Baselines" },
   { to: "/health", label: "Model health" },
 ];
 
@@ -101,7 +103,8 @@ export default function App() {
               <Route path="/queue" element={<AlertQueue />} />
               <Route path="/case/:id" element={<CaseReview />} />
               <Route path="/cases" element={<FollowThrough />} />
-              <Route path="/health" element={<ModelHealth />} />
+              <Route path="/baselines" element={<Baselines />} />
+            <Route path="/health" element={<ModelHealth />} />
             </Routes>
           </main>
         </div>

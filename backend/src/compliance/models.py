@@ -16,6 +16,21 @@ class Merchant(Base):
     __tablename__ = "merchants"
     merchant_id: Mapped[str] = mapped_column(String, primary_key=True)
     mcc: Mapped[str] = mapped_column(String, index=True)
+    mcc_description: Mapped[str | None] = mapped_column(String, default=None)
+    agent_id: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    # Merchant-identity hashes. Used only for equality joins in ring detection,
+    # never reversed, so their reversibility does not matter here.
+    hashed_merchant_name: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    hashed_br_number: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    hashed_merchant_address: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    city: Mapped[str | None] = mapped_column(String, default=None)
+    merchant_area: Mapped[str | None] = mapped_column(String, default=None)
+    merchant_district: Mapped[str | None] = mapped_column(String, default=None)
+    merchant_subdistrict: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    business_plan: Mapped[str | None] = mapped_column(String, default=None)
+    business_nature: Mapped[str | None] = mapped_column(String, default=None)
+    ownership_or_business_type: Mapped[str | None] = mapped_column(String, default=None)
+    merchant_status: Mapped[str | None] = mapped_column(String, default=None)
     registered_address: Mapped[str | None] = mapped_column(String, default=None)
     onboarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     lane: Mapped[str] = mapped_column(String, default="B")  # 'A' or 'B'
@@ -27,12 +42,22 @@ class Transaction(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_txn_id: Mapped[str] = mapped_column(String, unique=True, index=True)  # idempotent pull key
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.merchant_id"), index=True)
-    amount: Mapped[float] = mapped_column(Float)
+    total_amount: Mapped[float] = mapped_column(Float)  # gross value moved — the detection signal
+    net_amount: Mapped[float | None] = mapped_column(Float, default=None)  # after fees
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     is_refund: Mapped[bool] = mapped_column(Boolean, default=False)
-    terminal_id: Mapped[str | None] = mapped_column(String, default=None)
     card_bin: Mapped[str | None] = mapped_column(String, default=None)  # never full PAN
     geo: Mapped[str | None] = mapped_column(String, default=None)
+    card_type: Mapped[str | None] = mapped_column(String, default=None)
+    card_origin: Mapped[str | None] = mapped_column(String, default=None)
+    card_issuing_country: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    card_issuing_bank: Mapped[str | None] = mapped_column(String, default=None)
+    payment_gateway: Mapped[str | None] = mapped_column(String, default=None)
+    currency: Mapped[str | None] = mapped_column(String, default=None)
+    transaction_status: Mapped[str | None] = mapped_column(String, index=True, default=None)
+    # Sensitive: a 1:1 hash of a PAN is brute-forceable, so this is treated as
+    # cardholder data — never exposed through the API or the UI.
+    hashed_pan: Mapped[str | None] = mapped_column(String, index=True, default=None)
 
 
 class MerchantProfile(Base):

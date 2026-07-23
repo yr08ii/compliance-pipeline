@@ -94,7 +94,17 @@ The `0.6745` is the constant that makes MAD comparable to a standard deviation u
 
 Build a smooth probability density of *when* the merchant normally transacts (a bar clusters at 18:00–02:00; a bakery at 06:00–14:00) via Kernel Density Estimation. A transaction lands in a low-density region → anomalous timing.
 
-**Technical care:** time-of-day is *circular* — 23:30 and 00:30 are 60 minutes apart, not 23 hours. Use a circular kernel (map time onto the unit circle) or the density is wrong at the midnight boundary. Flag when the density at the observed time falls below a low percentile of the merchant's own density (calibrated), not an absolute probability.
+**Implemented as a von Mises kernel density on the 24-hour circle**, estimated on a 15-minute grid:
+
+- **Circular** — 23:30 and 00:30 are 60 minutes apart, not 23 hours, so a bar trading across midnight is one pattern rather than two clusters.
+- **Sub-hour resolution** — 03:15 and 03:45 are different distances from a 04:00 cluster. Hour buckets make them identical.
+- **Adaptive bandwidth** — Silverman-style `h ∝ n^(-1/5)`, clamped. A fixed width under-smooths a sparse merchant into noise and over-smooths a sharply-scheduled one until its boundary blurs.
+- **Per-merchant threshold** — a low percentile of *that merchant's own* density, never an absolute share. A fixed "below 1% of trade" cutoff flags constantly for any merchant whose trade spreads across many hours: a round-the-clock forecourt has no hour above ~4%.
+- **Cohort version uses a stricter percentile** — a cohort pools members keeping genuinely different hours, so its tails are legitimately wider; the same cutoff would flag a merchant for closing an hour later than most of its trade.
+
+Estimation is binned and convolved once, so cost does not scale with transaction count. Evaluating a naive KDE at every observation would be quadratic across a whole merchant base.
+
+**Timezone is load-bearing here.** "3am" means 3am where the merchant trades, so hour-of-day is read in Hong Kong time and the pipeline's scored day is the Hong Kong business day. Anchoring to UTC would cut the day at 08:00 local and split a merchant's trading in two.
 
 `feature_snapshot` entry: `{feature_name: "txn_hour", merchant_value: hour, baseline_value: <modal/active window>, deviation: <how far into the tail>}` — rendered as "3:30am, outside the 9am–9pm active window."
 
@@ -108,13 +118,62 @@ Maintain the merchant's historical distribution of card *issuer countries* — d
 
 For merchants (mature or new), compare against the cohort, not just their own history:
 
-- **MCC amount** — IQR upper fence across all same-MCC merchants: flag `x > Q₃ + k · IQR` (k = 1.5 mild, 3.0 extreme). Answers "high even for a jewelry shop."
+There are **two distinct peer questions**, and both are needed:
+
+- **Is this merchant's *transaction* unusual for its trade?** Ticket against the cohort's transaction distribution. This is the one that covers cold start: a median does not move for one large sale, so neither the merchant's own baseline (which it may not have) nor the merchant-level test can see it. Each member's contribution to the cohort is **capped** so a high-volume merchant cannot drag the distribution to cover itself.
+- **Is this *merchant* unusual for its cohort?** The merchant's own median against the cohort's distribution of medians — one vote per merchant. Catches the systematic case the first misses: every ticket sits inside the cohort's range, but the merchant's whole level is shifted.
+
+Both score with the **same modified z-score** as the self baseline. An earlier draft used a Tukey IQR fence here; that was wrong twice over. The IQR has a 25% breakdown point, so in a small cohort a single deviant member lands inside the upper quartile and drags Q₃ up far enough to cover itself — the exact contamination the detector exists to catch. And reporting a ratio while the self detector reported a z-score mixed units in the divergence panel. Cohort distributions are heavy-tailed like a merchant's own, so they take the same robust test.
+
 - **MCC time** — the cohort's active-hours density.
 - **Subdistrict amount / card-origin** — the district's norms (Mong Kok ≠ airport for foreign-card share); flag deviation from the district's foreign-card ratio.
 
 Peer baselines require a **minimum cohort size**; a 3-merchant MCC cohort is not a distribution. Fall back MCC×subdistrict → MCC-only → network-wide as cohorts thin out.
 
 `peer_groups` stores `{mcc, subdistrict, n_merchants, amount_q1, amount_q3, active_hours_kde_ref, foreign_card_ratio, ...}`, refreshed nightly.
+
+### 3.3a Volume and speed — the other two dimensions
+
+Amount alone is not enough, and the gap is not merely coverage: it is what makes cohort manipulation viable. To drag a cohort's amount distribution a merchant must transact far more than its peers, so if nothing measures volume, the evasion is free.
+
+| Quantity | Detector | Catches |
+|---|---|---|
+| **Amount** | ticket vs own / cohort | one large sale; wrong price level for the trade |
+| **Volume** | daily count vs own / cohort | many ordinary tickets; the manipulation attempt itself |
+| **Speed** | peak transactions per rolling hour vs own | a burst inside an ordinary daily total |
+
+All three use the same median/MAD/modified-z machinery, so every one reports comparable units into the divergence panel.
+
+**Counts need a dispersion floor of one transaction.** A merchant that trades exactly five times a day has zero spread — ordinary, not degenerate. Without a floor it falls to the constant fallback and a jump from five to sixty is invisible. The same floor applies to cohort counts, or a cold-start merchant flooding transactions has nothing watching it. Amounts keep the strict fallback, where zero spread genuinely does mean "fixed price, use a rule".
+
+**Speed is distinct from volume.** A merchant can put its entire ordinary daily count through in minutes; the day's total looks normal and only the within-day rate exposes the shape. Measured as the busiest rolling hour, so a burst is caught wherever it falls rather than against clock boundaries.
+
+**Together they close the loop.** Amount, volume, speed and peer comparison each cover what the others miss, so no single evasion route is silent: moving one signal shows up in another, and the lag means none of it can affect the baseline currently doing the judging.
+
+### 3.4a Baseline integrity — self-contamination and backfill
+
+A baseline fitted from a merchant's own history has a structural weakness: **the baseline can learn the crime.** This section states the exposure honestly and the mitigations.
+
+**What is already handled.** The scored period is excluded from its own baseline — the window is `[as_of − N, as_of)`, `as_of` exclusive. We never compute a median that includes the value being judged.
+
+**What robust statistics buy.** The median has a **50% breakdown point**: contamination below half the window does not move the center. This is the concrete payoff of median/MAD over mean/σ, where a single fraudulent transaction shifts the baseline immediately and begins masking the next one. A merchant abusing on a minority of days does not poison its own baseline.
+
+**What remains exposed.**
+
+| Exposure | Why it bites |
+|---|---|
+| **Sustained abuse** | Past ~50% of the window, the median follows the crime and "normal" becomes the abuse. |
+| **Slow ramps** | A merchant growing a few percent a day is never an outlier against its own trailing window, yet reaches 10× in two months. **No trailing self-baseline can see this** — it is the natural evasion against this design. |
+| **Contaminated backfill** | Initial baselines fitted on months of unaudited history encode undetected crime as normal. No statistic fixes this; the ground truth does not exist yet. |
+
+**Mitigations, in priority order.**
+
+1. **Peer baselines (§3.4) are the structural answer.** A merchant's own baseline can be poisoned by its own behaviour; the MCC/subdistrict peer baseline cannot be, unless the whole cohort is criminal. Peer comparison is immune to per-merchant self-contamination — which raises the priority of §3.4 from "more coverage" to "the antidote."
+2. **Quarantine confirmed-bad periods.** Transactions belonging to an alert dispositioned `TRUE_POSITIVE` are excluded from all future baseline fitting. Without this, the system's own confirmed findings are absorbed into normal. This is a second, and arguably better, use of disposition data than model training.
+3. **Trend / level-shift detector.** Compare a short-window median (e.g. 7d) against a long-window one (e.g. 90d). A ramp appears as a level shift even when no single day breaches. This is the only detector that catches slow growth.
+4. **Optional window lag.** End the baseline window several days before the scored day so very recent activity is not instantly normalised. Costs adaptation speed — hold unless 1–3 prove insufficient.
+
+**Launch backfill.** Fitting baselines over historical data is a one-time **backfill job** (a mode of Stage 2), not a training run — it exists so merchants start in Lane A rather than every merchant sitting in Lane B for the first month. The resulting baselines are provisional by definition. They are corrected by: running in **shadow mode** first, leaning on **peer** rather than **self** comparison in the early period, and **re-fitting once the first dispositions land** (feedback Loop 2). This is why shadow mode is a requirement and not a nicety — it is the only way to validate baselines fitted on unaudited history.
 
 ### 3.5 The cold-start (new / Lane B) path
 
@@ -234,9 +293,15 @@ Every number here is a *starting point* set against synthetic data and re-tuned 
 
 ## 10. Build order (feeds the next implementation plan)
 
-0. **Ingest the real schema** (§0.1) — widen the model, drop `terminal_id`, resolve refund encoding. Prerequisite for everything below.
-1. **Robust amount baseline** (Median/MAD + modified z, with the MAD=0 and min-n guards) replacing the stub — Lane A, fully explainable, drops into the existing divergence panel.
-2. **Peer baselines** (`peer_groups` + MCC IQR) and the Lane B `Ruleset′(mcc)` cold-start path.
+0. ~~**Ingest the real schema**~~ — **done.** Model widened to §0.1, `terminal_id` dropped, JSON parser behind a format-agnostic boundary, idempotent on `payment_id`. Refunds honoured from either a status or a negative amount pending the confirmed encoding (open question Q1).
+1. ~~**Robust amount baseline**~~ — **done.** Median/MAD + modified z, with the MAD=0 / min-observations / min-span guards, wired through stages 2–4.
+2. ~~**Peer baselines**~~ — **done.** Both peer questions (§3.4), scored with the same modified z.
+2a. ~~**Baseline integrity**~~ — **done.** Lag, `TRUE_POSITIVE` quarantine, trend detector, peer cohorts (§3.4a), and the backfill command (once-off, no UI, prints its own provisional caveat).
+2b. ~~**Volume and speed**~~ — **done.** Daily count (self and peer) and peak hourly rate (§3.3a).
+2c. ~~**Baseline provenance UI**~~ — **done.** Window bounds, next inclusion date, coverage, withheld days.
+2d. ~~**Time and card-origin baselines**~~ — **done** (§3.2, §3.3). Hour-of-day smooths circularly; origin uses Laplace-smoothed surprisal so an unseen country is improbable rather than impossible, and a merchant that always sees foreign cards is not flagged for foreignness.
+
+**Family A is complete.** Next: Family B (the typology ruleset, which is what Lane B merchants still lack) and Family C (ring detection, for which the merchant identity hashes are now ingested).
 3. **Time (circular KDE) and card-origin** baselines; festive-calendar context.
 4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement, declared-vs-actual mismatch, decline-ratio).
 5. **Merchant-identity rings** (§5.1) — equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation. Cheap, in-scope, no card data. Build here, not last.
