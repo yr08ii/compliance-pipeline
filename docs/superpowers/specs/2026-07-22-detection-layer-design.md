@@ -94,7 +94,17 @@ The `0.6745` is the constant that makes MAD comparable to a standard deviation u
 
 Build a smooth probability density of *when* the merchant normally transacts (a bar clusters at 18:00–02:00; a bakery at 06:00–14:00) via Kernel Density Estimation. A transaction lands in a low-density region → anomalous timing.
 
-**Technical care:** time-of-day is *circular* — 23:30 and 00:30 are 60 minutes apart, not 23 hours. Use a circular kernel (map time onto the unit circle) or the density is wrong at the midnight boundary. Flag when the density at the observed time falls below a low percentile of the merchant's own density (calibrated), not an absolute probability.
+**Implemented as a von Mises kernel density on the 24-hour circle**, estimated on a 15-minute grid:
+
+- **Circular** — 23:30 and 00:30 are 60 minutes apart, not 23 hours, so a bar trading across midnight is one pattern rather than two clusters.
+- **Sub-hour resolution** — 03:15 and 03:45 are different distances from a 04:00 cluster. Hour buckets make them identical.
+- **Adaptive bandwidth** — Silverman-style `h ∝ n^(-1/5)`, clamped. A fixed width under-smooths a sparse merchant into noise and over-smooths a sharply-scheduled one until its boundary blurs.
+- **Per-merchant threshold** — a low percentile of *that merchant's own* density, never an absolute share. A fixed "below 1% of trade" cutoff flags constantly for any merchant whose trade spreads across many hours: a round-the-clock forecourt has no hour above ~4%.
+- **Cohort version uses a stricter percentile** — a cohort pools members keeping genuinely different hours, so its tails are legitimately wider; the same cutoff would flag a merchant for closing an hour later than most of its trade.
+
+Estimation is binned and convolved once, so cost does not scale with transaction count. Evaluating a naive KDE at every observation would be quadratic across a whole merchant base.
+
+**Timezone is load-bearing here.** "3am" means 3am where the merchant trades, so hour-of-day is read in Hong Kong time and the pipeline's scored day is the Hong Kong business day. Anchoring to UTC would cut the day at 08:00 local and split a merchant's trading in two.
 
 `feature_snapshot` entry: `{feature_name: "txn_hour", merchant_value: hour, baseline_value: <modal/active window>, deviation: <how far into the tail>}` — rendered as "3:30am, outside the 9am–9pm active window."
 
