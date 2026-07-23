@@ -75,7 +75,7 @@ flowchart TD
 
 ## 3. Zoom · Family A — robust baselines
 
-Answers: *"is this number unusual for this merchant, or for its peers?"* Six detectors across three measured quantities and two frames of reference. Every one is natively explainable — each emits a `feature_snapshot` row the divergence panel renders, and all report the same modified z-score so they are comparable.
+Answers: *"is this unusual for this merchant, for its trade, or for where it trades?"* Twelve detectors across three frames of reference — the merchant's own history, its MCC cohort, and its district. Every one is natively explainable — each emits a `feature_snapshot` row the divergence panel renders, and all report the same modified z-score so they are comparable.
 
 ```mermaid
 flowchart TD
@@ -84,12 +84,17 @@ flowchart TD
         A2["Volume<br/>daily count vs own"]
         A3["Speed<br/>peak per hour vs own"]
         A4["Trend<br/>7d level vs 90d level"]
+        A5["When<br/>hour vs own pattern"]
+        A6["Whose cards<br/>origin vs own mix"]
     end
 
-    subgraph PEER["Cohort · is this unusual FOR THIS TRADE?"]
-        P1["Ticket vs cohort tickets<br/>works with no own history"]
-        P2["Merchant level vs cohort levels<br/>one vote per merchant"]
-        P3["Daily count vs cohort counts"]
+    subgraph PEER["Cohort · unusual FOR THIS TRADE, or FOR THIS PLACE?"]
+        P1["Ticket vs MCC tickets<br/>works with no own history"]
+        P2["Merchant level vs MCC levels<br/>one vote per merchant"]
+        P3["Daily count vs MCC counts"]
+        P4["Hour vs MCC operating hours"]
+        P5["Ticket vs subdistrict tickets"]
+        P6["Foreign-card share vs district"]
     end
 
     OWN --> SNAP["feature_snapshot rows<br/>feature, merchant value,<br/>baseline value, modified z"]
@@ -380,3 +385,5 @@ Not used for detection: `masked_pan` (display only — never an identifier), `pa
 | Peer scoring switched from Tukey IQR to **median/MAD** | IQR breaks down at 25%, so in a small cohort one deviant member lands inside the upper quartile and drags Q₃ up far enough to hide itself. |
 | Added the **four integrity defences** | A self-fitted baseline can learn the crime: lag, quarantine, trend and peer each close a different route. |
 | Added the **baseline provenance page** | What each baseline is built from, and which day joins it tonight, was invisible. |
+| Added **subdistrict** as a cohort dimension | Peer tests keyed on MCC alone. A HKD 800 ticket is ordinary for a Central restaurant and remarkable in Sham Shui Po, and foreign-card share is a property of the district, not the trade. |
+| Added **cohort operating hours** | A cold-start merchant has no hours pattern of its own, so only its trade's hours can say 3am is odd. |
