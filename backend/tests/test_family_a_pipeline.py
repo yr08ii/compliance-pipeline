@@ -97,7 +97,10 @@ class TestFamilyADetection:
         session.flush()
 
         hits = _run_family_a(session)
-        spike = next(h for h in hits if h["merchant_id"] == "SPIKE")
+        spike = next(
+            h for h in hits
+            if h["merchant_id"] == "SPIKE" and h["detector"] == "amount_vs_own_baseline"
+        )
         feature = spike["feature"]
 
         assert feature["feature_name"] == "ticket_amount"
@@ -132,6 +135,6 @@ class TestEndToEnd:
 
         alerts = list(session.scalars(select(Alert).order_by(Alert.rank)))
         assert alerts, "no alert written"
-        top = alerts[0]
-        assert top.merchant_id == "SPIKE"
-        assert top.feature_snapshot[0]["baseline_value"] > 0
+        assert alerts[0].rank == 1
+        assert all(a.feature_snapshot[0]["baseline_value"] > 0 for a in alerts)
+        assert "SPIKE" in {a.merchant_id for a in alerts}

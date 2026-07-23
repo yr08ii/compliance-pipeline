@@ -27,6 +27,8 @@ STEADY = "STEADY"  # mature, well-behaved — must NOT be flagged
 SPIKE = "SPIKE"  # mature, single huge ticket today — MUST be flagged
 FIXED = "FIXED"  # mature, one fixed price — degenerate baseline
 NEWBIE = "NEWBIE"  # too little history — belongs in Lane B
+RAMP = "RAMP"  # grows a few percent daily — invisible to a self-baseline
+PEER_OUT = "PEEROUT"  # stable for itself, far above its cohort
 
 
 @dataclass(frozen=True)
@@ -38,13 +40,27 @@ class MerchantSpec:
     spread: float
     txns_per_day: int
     history_days: int
+    daily_growth: float = 0.0
 
 
+# Cohort members give each MCC enough merchants for a peer baseline; without
+# them every cohort has one member and peer comparison cannot run.
 SPECS = (
     MerchantSpec(STEADY, "5411", "Mong Kok", 120.0, 25.0, 6, 90),
+    MerchantSpec("GROCER2", "5411", "Mong Kok", 95.0, 20.0, 5, 90),
+    MerchantSpec("GROCER3", "5411", "Sham Shui Po", 140.0, 30.0, 5, 90),
+    MerchantSpec("GROCER4", "5411", "Central", 110.0, 22.0, 6, 90),
+    # Its own history is perfectly stable, so a self-baseline never fires.
+    # Only the cohort fence can see that it is an outlier for a grocer.
+    MerchantSpec(PEER_OUT, "5411", "Central", 4_200.0, 60.0, 5, 90),
     MerchantSpec(SPIKE, "5944", "Central", 3000.0, 400.0, 4, 90),
+    MerchantSpec("JEWEL2", "5944", "Tsim Sha Tsui", 2600.0, 350.0, 4, 90),
+    MerchantSpec("JEWEL3", "5944", "Mong Kok", 3400.0, 450.0, 4, 90),
     MerchantSpec(FIXED, "5814", "Sham Shui Po", 38.0, 0.0, 8, 90),
     MerchantSpec(NEWBIE, "5732", "Tsim Sha Tsui", 800.0, 150.0, 3, 4),
+    # 4% a day compounds to ~10x over 60 days, yet no single day is an
+    # outlier against its own trailing window.
+    MerchantSpec(RAMP, "5814", "Central", 60.0, 12.0, 5, 90, daily_growth=0.04),
 )
 
 # The injected anomaly: a ticket far outside SPIKE's own normal, on the day
@@ -82,9 +98,12 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
 
         for day in range(spec.history_days, -1, -1):
             occurred_day = as_of - timedelta(days=day)
+            # `day` counts backwards, so elapsed time is history_days - day.
+            growth = (1.0 + spec.daily_growth) ** (spec.history_days - day)
+
             for n in range(spec.txns_per_day):
                 counter += 1
-                amount = _ticket(rng, spec)
+                amount = round(_ticket(rng, spec) * growth, 2)
 
                 # Inject the anomaly on the scored day only.
                 if spec.merchant_id == SPIKE and day == 0 and n == 0:

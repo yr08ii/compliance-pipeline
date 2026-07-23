@@ -1,0 +1,243 @@
+"""The four defences against a baseline learning the crime (spec §3.4a)."""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from compliance.detection.baselines import DispersionMethod, fit_peer_baseline
+from compliance.detection.windows import (
+    fit_all_baselines,
+    fit_peer_baselines,
+    fit_trend,
+    quarantined_days,
+)
+from compliance.models import Alert, Base, Disposition, Merchant, Transaction
+
+AS_OF = datetime(2026, 7, 20, tzinfo=timezone.utc)
+WINDOW = 30
+_seq = [0]
+
+
+@pytest.fixture()
+def session():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as s:
+        yield s
+
+
+def _txn(session, merchant_id, amount, days_before):
+    _seq[0] += 1
+    session.add(
+        Transaction(
+            source_txn_id=f"BI{_seq[0]:07d}",
+            merchant_id=merchant_id,
+            total_amount=amount,
+            occurred_at=AS_OF - timedelta(days=days_before),
+            is_refund=False,
+        )
+    )
+
+
+def _confirm_true_positive(session, merchant_id, days_before):
+    """An alert on that day, reviewed and confirmed as real."""
+    alert = Alert(
+        merchant_id=merchant_id,
+        created_at=AS_OF - timedelta(days=days_before),
+        lane="A",
+        blended_score=0.9,
+        rank=1,
+        triggering_detectors=[],
+        feature_snapshot=[],
+    )
+    session.add(alert)
+    session.flush()
+    session.add(
+        Disposition(
+            alert_id=alert.id,
+            verdict="TRUE_POSITIVE",
+            reason_code="STRUCTURING_CONFIRMED",
+            risk_axis="REGULATORY",
+            action_taken="STR_FILED",
+            analyst_id="analyst-1",
+        )
+    )
+    session.flush()
+
+
+class TestLag:
+    def test_lag_excludes_recent_days_from_the_baseline(self, session):
+        """Recent data must not enter the baseline before analysts have had
+        time to rule on it — a disposition takes days to arrive."""
+        session.add(Merchant(merchant_id="M1", mcc="5411"))
+        for day in range(8, 30):
+            _txn(session, "M1", 90.0, day)
+            _txn(session, "M1", 110.0, day)
+        # A heavy burst inside the lag period, large enough to move an
+        # unlagged median. It must not shape the baseline until analysts
+        # have had the chance to rule on it.
+        for day in range(1, 7):
+            for _ in range(20):
+                _txn(session, "M1", 9_000.0, day)
+        session.flush()
+
+        lagged = fit_all_baselines(
+            session, AS_OF, WINDOW, min_observations=12, lag_days=7
+        )["M1"]
+        unlagged = fit_all_baselines(
+            session, AS_OF, WINDOW, min_observations=12, lag_days=0
+        )["M1"]
+
+        assert lagged.center == pytest.approx(100.0)
+        assert unlagged.center == pytest.approx(9_000.0)
+
+    def test_lagged_window_still_reaches_back_a_full_window(self, session):
+        session.add(Merchant(merchant_id="M1", mcc="5411"))
+        for day in range(8, 34):
+            _txn(session, "M1", 45.0, day)
+            _txn(session, "M1", 55.0, day)
+        session.flush()
+
+        b = fit_all_baselines(
+            session, AS_OF, WINDOW, min_observations=12, lag_days=7
+        )["M1"]
+
+        assert b.usable is True
+        assert b.center == pytest.approx(50.0)
+
+
+class TestQuarantine:
+    def test_confirmed_true_positive_days_are_quarantined(self, session):
+        session.add(Merchant(merchant_id="M1", mcc="5411"))
+        session.flush()
+        _confirm_true_positive(session, "M1", days_before=10)
+
+        assert ("M1", (AS_OF - timedelta(days=10)).date()) in quarantined_days(session)
+
+    def test_false_positive_days_are_not_quarantined(self, session):
+        """A cleared alert means the behaviour was legitimate — that data
+        belongs in the baseline."""
+        session.add(Merchant(merchant_id="M1", mcc="5411"))
+        alert = Alert(
+            merchant_id="M1", created_at=AS_OF - timedelta(days=10), lane="A",
+            blended_score=0.5, rank=1, triggering_detectors=[], feature_snapshot=[],
+        )
+        session.add(alert)
+        session.flush()
+        session.add(Disposition(
+            alert_id=alert.id, verdict="FALSE_POSITIVE", reason_code="SEASONAL_PROMOTION",
+            risk_axis="COMMERCIAL", action_taken="NONE", analyst_id="analyst-1",
+        ))
+        session.flush()
+
+        assert quarantined_days(session) == set()
+
+    def test_quarantined_transactions_do_not_shape_the_baseline(self, session):
+        """Otherwise the system absorbs its own confirmed findings as normal."""
+        session.add(Merchant(merchant_id="M1", mcc="5411"))
+        for day in range(10, 30):
+            _txn(session, "M1", 100.0, day)
+        for _ in range(30):
+            _txn(session, "M1", 8_000.0, 9)
+        session.flush()
+        _confirm_true_positive(session, "M1", days_before=9)
+
+        clean = fit_all_baselines(session, AS_OF, WINDOW, min_observations=12)["M1"]
+
+        assert clean.center == pytest.approx(100.0)
+
+
+class TestTrend:
+    def test_detects_a_slow_ramp_no_single_day_would_flag(self, session):
+        """The boiling-frog evasion: never an outlier against its own trailing
+        window, but 10x over two months."""
+        session.add(Merchant(merchant_id="RAMP", mcc="5411"))
+        for day in range(0, 60):
+            amount = 100.0 * (1.04 ** (60 - day))
+            for _ in range(3):
+                _txn(session, "RAMP", round(amount, 2), day)
+        session.flush()
+
+        trend = fit_trend(session, "RAMP", AS_OF, short_days=7, long_days=60, lag_days=0)
+
+        assert trend.is_ramp is True
+        assert trend.ratio > 2.0
+
+    def test_steady_merchant_is_not_a_ramp(self, session):
+        session.add(Merchant(merchant_id="FLAT", mcc="5411"))
+        for day in range(0, 60):
+            for amount in (95.0, 105.0):
+                _txn(session, "FLAT", amount, day)
+        session.flush()
+
+        trend = fit_trend(session, "FLAT", AS_OF, short_days=7, long_days=60, lag_days=0)
+
+        assert trend.is_ramp is False
+
+    def test_thin_history_is_not_reported_as_a_ramp(self, session):
+        session.add(Merchant(merchant_id="THIN", mcc="5411"))
+        _txn(session, "THIN", 100.0, 1)
+        session.flush()
+
+        assert fit_trend(session, "THIN", AS_OF, short_days=7, long_days=60,
+                         lag_days=0).is_ramp is False
+
+
+class TestPeerBaseline:
+    def test_upper_fence_sits_above_the_cohort_centre(self):
+        peer = fit_peer_baseline([10.0, 20.0, 30.0, 40.0, 50.0], n_merchants=5)
+        assert peer.usable
+        assert peer.upper_fence() > peer.center
+
+    def test_cohort_too_small_is_unusable(self):
+        assert fit_peer_baseline([10.0, 20.0], n_merchants=1).usable is False
+
+    def test_fits_a_baseline_per_mcc(self, session):
+        session.add_all([
+            Merchant(merchant_id="G1", mcc="5411"),
+            Merchant(merchant_id="G2", mcc="5411"),
+            Merchant(merchant_id="G3", mcc="5411"),
+            Merchant(merchant_id="G4", mcc="5411"),
+            Merchant(merchant_id="J1", mcc="5944"),
+            Merchant(merchant_id="J2", mcc="5944"),
+            Merchant(merchant_id="J3", mcc="5944"),
+            Merchant(merchant_id="J4", mcc="5944"),
+        ])
+        # Members differ from one another, as a real cohort does.
+        for m, typical in (("G1", 80.0), ("G2", 100.0), ("G3", 120.0), ("G4", 140.0)):
+            for day in range(1, 20):
+                _txn(session, m, typical, day)
+        for m, typical in (("J1", 2600.0), ("J2", 3000.0), ("J3", 3400.0), ("J4", 3800.0)):
+            for day in range(1, 20):
+                _txn(session, m, typical, day)
+        session.flush()
+
+        peers = fit_peer_baselines(session, AS_OF, WINDOW, min_cohort_merchants=3)
+
+        assert peers["5411"].usable and peers["5944"].usable
+        assert peers["5944"].center > peers["5411"].center * 10
+
+    def test_peer_baseline_is_unpoisoned_by_one_high_volume_bad_merchant(self, session):
+        """The structural point: a merchant can corrupt its own baseline but
+        not its cohort's — even when it out-transacts every honest member.
+
+        Cohorts are built one-vote-per-merchant for exactly this reason. Pooled
+        raw transactions would let this merchant's volume drag the fence up to
+        cover itself.
+        """
+        session.add_all([Merchant(merchant_id=f"P{i}", mcc="5411") for i in range(6)])
+        for i, typical in enumerate([90.0, 100.0, 110.0, 120.0, 130.0]):
+            for day in range(1, 20):
+                _txn(session, f"P{i}", typical, day)
+        # Five times the transaction volume of any honest member.
+        for day in range(1, 20):
+            for _ in range(5):
+                _txn(session, "P5", 50_000.0, day)
+        session.flush()
+
+        peers = fit_peer_baselines(session, AS_OF, WINDOW, min_cohort_merchants=3)
+
+        assert peers["5411"].usable
+        assert peers["5411"].upper_fence() < 50_000.0

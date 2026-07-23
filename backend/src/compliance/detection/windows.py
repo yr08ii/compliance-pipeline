@@ -11,17 +11,50 @@ cannot build the peer cohorts that Family A's peer baselines need.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.baselines import Baseline, fit_baseline
-from compliance.models import Merchant, Transaction
+from compliance.detection.baselines import (
+    Baseline,
+    PeerBaseline,
+    Trend,
+    detect_ramp,
+    fit_baseline,
+    fit_peer_baseline,
+)
+from compliance.models import Alert, Disposition, Merchant, Transaction
 
 
-def _window_start(as_of: datetime, window_days: int) -> datetime:
-    return as_of - timedelta(days=window_days)
+def _window_bounds(
+    as_of: datetime, window_days: int, lag_days: int = 0
+) -> tuple[datetime, datetime]:
+    """The half-open baseline window [start, end).
+
+    `lag_days` holds the window back from the present. This is not a tuning
+    knob: a disposition takes days to arrive, so the lag is the interval in
+    which analysts can still rule on activity before it is absorbed into the
+    baseline. Without it, data is normalised before anyone has judged it.
+    """
+    end = as_of - timedelta(days=lag_days)
+    return end - timedelta(days=window_days), end
+
+
+def quarantined_days(session: Session) -> set[tuple[str, date]]:
+    """(merchant, day) pairs confirmed as genuinely bad.
+
+    Transactions from these days must never shape a future baseline, or the
+    system absorbs its own confirmed findings as normal. Only TRUE_POSITIVE
+    counts — a cleared alert means the behaviour was legitimate and belongs
+    in the baseline.
+    """
+    rows = session.execute(
+        select(Alert.merchant_id, Alert.created_at)
+        .join(Disposition, Disposition.alert_id == Alert.id)
+        .where(Disposition.verdict == "TRUE_POSITIVE")
+    )
+    return {(merchant_id, created_at.date()) for merchant_id, created_at in rows}
 
 
 def amounts_in_window(
@@ -36,12 +69,13 @@ def amounts_in_window(
     into the ticket baseline distorts the merchant's normal. The refund-ratio
     rule covers them instead.
     """
+    start, end = _window_bounds(as_of, window_days)
     stmt = (
         select(Transaction.total_amount)
         .where(
             Transaction.merchant_id == merchant_id,
-            Transaction.occurred_at >= _window_start(as_of, window_days),
-            Transaction.occurred_at < as_of,
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
             Transaction.is_refund.is_(False),
         )
         .order_by(Transaction.occurred_at)
@@ -56,6 +90,8 @@ def fit_all_baselines(
     *,
     min_observations: int,
     min_span_days: int = 0,
+    lag_days: int = 0,
+    exclude_quarantined: bool = True,
 ) -> dict[str, Baseline]:
     """Fit an amount baseline for every merchant in one pass.
 
@@ -68,20 +104,25 @@ def fit_all_baselines(
     baseline rather than omitted — the router needs to see them to send them
     down Lane B, and a silently missing merchant is a merchant nobody monitors.
     """
+    start, end = _window_bounds(as_of, window_days, lag_days)
     rows = session.execute(
         select(Transaction.merchant_id, Transaction.total_amount, Transaction.occurred_at)
         .where(
-            Transaction.occurred_at >= _window_start(as_of, window_days),
-            Transaction.occurred_at < as_of,
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
             Transaction.is_refund.is_(False),
         )
         .order_by(Transaction.merchant_id, Transaction.occurred_at)
     )
 
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
     amounts: dict[str, list[float]] = {}
     first_seen: dict[str, datetime] = {}
     last_seen: dict[str, datetime] = {}
     for merchant_id, amount, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
         amounts.setdefault(merchant_id, []).append(amount)
         first_seen.setdefault(merchant_id, occurred_at)
         last_seen[merchant_id] = occurred_at
@@ -99,3 +140,80 @@ def fit_all_baselines(
         merchant_id: _fit(merchant_id)
         for merchant_id in session.scalars(select(Merchant.merchant_id))
     }
+
+
+def fit_peer_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    lag_days: int = 0,
+    min_cohort_merchants: int = 3,
+    exclude_quarantined: bool = True,
+) -> dict[str, PeerBaseline]:
+    """Fit one amount distribution per MCC cohort.
+
+    The cohort is built from each member's *median ticket* — one vote per
+    merchant — not from pooled raw transactions. Pooling weights merchants by
+    transaction volume, so a single high-volume launderer can dominate its
+    cohort and drag the fence up to cover itself, which is precisely the
+    contamination peer comparison exists to resist.
+
+    With equal weighting it is usable even on unaudited history: a dirty
+    merchant is one point among many, and the IQR is built from quartiles that
+    ignore the tail it sits in. Dilution plus robustness is what lets a launch
+    lean on peer comparison before any history is vetted.
+    """
+    from statistics import median as _median
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(Merchant.mcc, Transaction.merchant_id, Transaction.total_amount,
+               Transaction.occurred_at)
+        .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
+        .where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    per_merchant: dict[str, dict[str, list[float]]] = {}
+    for mcc, merchant_id, amount, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        per_merchant.setdefault(mcc, {}).setdefault(merchant_id, []).append(amount)
+
+    cohorts: dict[str, PeerBaseline] = {}
+    for mcc, members in per_merchant.items():
+        centers = [_median(values) for values in members.values() if values]
+        cohorts[mcc] = fit_peer_baseline(centers, n_merchants=len(centers))
+    return cohorts
+
+
+def fit_trend(
+    session: Session,
+    merchant_id: str,
+    as_of: datetime,
+    *,
+    short_days: int,
+    long_days: int,
+    lag_days: int = 0,
+    min_observations: int = 6,
+) -> Trend:
+    """Compare a merchant's recent level against its long-run level.
+
+    Catches the one thing a trailing self-baseline structurally cannot: a slow
+    ramp, where no single day is an outlier against its own recent history but
+    the level multiplies over months.
+    """
+    from statistics import median
+
+    short = amounts_in_window(session, merchant_id, as_of - timedelta(days=lag_days), short_days)
+    long = amounts_in_window(session, merchant_id, as_of - timedelta(days=lag_days), long_days)
+
+    if len(short) < min_observations or len(long) < min_observations:
+        return Trend(0.0, 0.0, 0.0, False)
+
+    return detect_ramp(median(short), median(long))

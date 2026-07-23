@@ -13,7 +13,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import DispersionMethod, score_value
-from compliance.detection.windows import amounts_in_window, fit_all_baselines
+from compliance.detection.windows import (
+    _window_bounds,
+    fit_all_baselines,
+    fit_peer_baselines,
+    fit_trend,
+    quarantined_days,
+)
 from compliance.models import Alert, Merchant, MerchantProfile, Transaction
 
 # Rolling window and minimum history for a usable baseline. Starting points —
@@ -24,8 +30,17 @@ MIN_OBSERVATIONS = 12
 # Maturity is count AND elapsed days: a merchant trading heavily for a few days
 # can clear the count while having no weekly shape to be a baseline.
 MIN_SPAN_DAYS = 14
+# Hold the baseline window back from the present. Not a tuning knob: a
+# disposition takes days to arrive, so this is the interval in which analysts
+# can still rule on activity before it is absorbed into the baseline.
+LAG_DAYS = 7
+# Short vs long level comparison — the only thing that sees a slow ramp.
+TREND_SHORT_DAYS = 7
+TREND_LONG_DAYS = 90
 
 AMOUNT_DETECTOR = "amount_vs_own_baseline"
+PEER_DETECTOR = "amount_vs_mcc_peers"
+TREND_DETECTOR = "level_shift_ramp"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -47,9 +62,25 @@ def profile(session: Session, *, as_of: datetime) -> None:
         WINDOW_DAYS,
         min_observations=MIN_OBSERVATIONS,
         min_span_days=MIN_SPAN_DAYS,
+        lag_days=LAG_DAYS,
     )
+    peers = fit_peer_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
+    quarantined = quarantined_days(session)
+    window_start, window_end = _window_bounds(as_of, WINDOW_DAYS, LAG_DAYS)
 
     for merchant_id, baseline in baselines.items():
+        merchant = session.get(Merchant, merchant_id)
+        peer = peers.get(merchant.mcc) if merchant else None
+        trend = fit_trend(
+            session,
+            merchant_id,
+            as_of,
+            short_days=TREND_SHORT_DAYS,
+            long_days=TREND_LONG_DAYS,
+            lag_days=LAG_DAYS,
+        )
+        excluded = sum(1 for m, _ in quarantined if m == merchant_id)
+
         session.add(
             MerchantProfile(
                 merchant_id=merchant_id,
@@ -60,9 +91,23 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "baseline_method": baseline.method.value,
                     "baseline_n": baseline.n,
                     "baseline_usable": baseline.usable,
+                    # Provenance: which data formed this baseline, and what was
+                    # withheld from it. Surfaced on the baseline dashboard.
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
                     "window_days": WINDOW_DAYS,
+                    "lag_days": LAG_DAYS,
                     "min_observations": MIN_OBSERVATIONS,
                     "min_span_days": MIN_SPAN_DAYS,
+                    "quarantined_days": excluded,
+                    "peer_mcc": merchant.mcc if merchant else None,
+                    "peer_q1": peer.q1 if peer else None,
+                    "peer_q3": peer.q3 if peer else None,
+                    "peer_fence": peer.upper_fence() if peer and peer.usable else None,
+                    "peer_merchants": peer.n_merchants if peer else 0,
+                    "peer_usable": bool(peer and peer.usable),
+                    "trend_ratio": round(trend.ratio, 3),
+                    "trend_is_ramp": trend.is_ramp,
                 },
             )
         )
@@ -116,6 +161,44 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
     hits: list[dict] = []
 
     for p in session.scalars(select(MerchantProfile)):
+        # Peer and trend detectors run in BOTH lanes. A cohort fence needs no
+        # history of the merchant's own, so it is the only Family A signal a
+        # cold-start merchant can be scored against — and the only one immune
+        # to that merchant's own baseline being contaminated.
+        day_amounts = _scored_day_amounts(session, p.merchant_id, as_of)
+
+        if p.metrics.get("peer_usable") and day_amounts:
+            fence = p.metrics["peer_fence"]
+            worst_peer = max(day_amounts)
+            if worst_peer > fence:
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_DETECTOR,
+                    "sub_score": min((worst_peer / fence) / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "ticket_vs_mcc_peers",
+                        "merchant_value": worst_peer,
+                        "baseline_value": fence,
+                        "deviation": round(worst_peer / fence, 2),
+                    },
+                })
+
+        if p.metrics.get("trend_is_ramp"):
+            ratio = p.metrics["trend_ratio"]
+            hits.append({
+                "merchant_id": p.merchant_id,
+                "lane": lanes.get(p.merchant_id, "B"),
+                "detector": TREND_DETECTOR,
+                "sub_score": min(ratio / 10.0, 1.0),
+                "feature": {
+                    "feature_name": "level_shift_7d_vs_90d",
+                    "merchant_value": p.metrics["baseline_center"],
+                    "baseline_value": p.metrics["baseline_center"] / ratio if ratio else 0.0,
+                    "deviation": ratio,
+                },
+            })
+
         if lanes.get(p.merchant_id) != "A":
             continue
 
