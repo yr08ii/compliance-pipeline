@@ -33,9 +33,13 @@ def test_labels_avoid_the_internal_vocabulary():
     """The point is a sentence an analyst can act on, not a restatement of the
     identifier."""
     jargon = ("mcc", "baseline", "z-score", "subdistrict", "peer", "vs_")
-    for term in glossary.DETECTORS:
+    # "sale"/"takings" are vaguer than the source system's own noun. Using a
+    # synonym for transaction adds a translation step instead of removing one.
+    vague = ("sale", "takings", "level ", "run level")
+    for term in glossary.DETECTORS + glossary.FEATURES:
         lowered = term.label.lower()
         assert not any(word in lowered for word in jargon), term.label
+        assert not any(word in lowered for word in vague), term.label
 
 
 def test_endpoint_returns_all_four_vocabularies():

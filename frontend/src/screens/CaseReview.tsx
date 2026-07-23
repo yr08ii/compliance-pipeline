@@ -74,7 +74,7 @@ export default function CaseReview() {
           <table className="w-full text-sm">
             <thead className="bg-slate-50/80 text-left text-xs uppercase tracking-[0.18em] text-slate-500">
               <tr>
-                <th className="px-6 py-4 font-medium">Feature</th>
+                <th className="px-6 py-4 font-medium">Measure</th>
                 <th className="px-6 py-4 font-medium">Merchant</th>
                 <th className="px-6 py-4 font-medium">Baseline</th>
                 <th className="px-6 py-4 font-medium">Deviation</th>
