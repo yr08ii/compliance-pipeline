@@ -12,7 +12,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.baselines import DispersionMethod, score_value
+from compliance.detection.baselines import Baseline, DispersionMethod, score_value
 from compliance.detection.windows import (
     _window_bounds,
     fit_all_baselines,
@@ -101,8 +101,8 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "min_span_days": MIN_SPAN_DAYS,
                     "quarantined_days": excluded,
                     "peer_mcc": merchant.mcc if merchant else None,
-                    "peer_q1": peer.q1 if peer else None,
-                    "peer_q3": peer.q3 if peer else None,
+                    "peer_center": peer.center if peer else None,
+                    "peer_dispersion": peer.dispersion if peer else None,
                     "peer_fence": peer.upper_fence() if peer and peer.usable else None,
                     "peer_merchants": peer.n_merchants if peer else 0,
                     "peer_usable": bool(peer and peer.usable),
@@ -156,7 +156,6 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
     inventing one would flag merchants for being new. Their static ruleset is
     Family B, not yet built.
     """
-    from compliance.detection.baselines import Baseline
 
     hits: list[dict] = []
 
@@ -167,20 +166,29 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # to that merchant's own baseline being contaminated.
         day_amounts = _scored_day_amounts(session, p.merchant_id, as_of)
 
-        if p.metrics.get("peer_usable") and day_amounts:
-            fence = p.metrics["peer_fence"]
-            worst_peer = max(day_amounts)
-            if worst_peer > fence:
+        # Peer test: is this MERCHANT unusual for its cohort? Its own typical
+        # ticket against the cohort's distribution of typical tickets — like
+        # against like. Comparing a single transaction to a distribution of
+        # medians would mix units and mean nothing.
+        if p.metrics.get("peer_usable") and p.metrics.get("baseline_center"):
+            cohort = Baseline(
+                center=p.metrics["peer_center"],
+                dispersion=p.metrics["peer_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["peer_merchants"],
+            )
+            peer_score = score_value(p.metrics["baseline_center"], cohort)
+            if peer_score.is_outlier:
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
                     "detector": PEER_DETECTOR,
-                    "sub_score": min((worst_peer / fence) / 10.0, 1.0),
+                    "sub_score": min(peer_score.deviation / 10.0, 1.0),
                     "feature": {
-                        "feature_name": "ticket_vs_mcc_peers",
-                        "merchant_value": worst_peer,
-                        "baseline_value": fence,
-                        "deviation": round(worst_peer / fence, 2),
+                        "feature_name": "typical_ticket_vs_mcc_peers",
+                        "merchant_value": p.metrics["baseline_center"],
+                        "baseline_value": cohort.center,
+                        "deviation": round(peer_score.deviation, 2),
                     },
                 })
 

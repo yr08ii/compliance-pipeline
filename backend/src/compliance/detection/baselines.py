@@ -97,7 +97,10 @@ class PeerBaseline:
         return self.n_merchants >= MIN_COHORT_MERCHANTS and self.dispersion > 0
 
     def upper_fence(self, k: float = OUTLIER_BAND) -> float:
-        """The amount at which a member becomes an outlier for its cohort.
+        """The typical-ticket level at which a member is an outlier for its
+        cohort. Algebraically the point where the modified z-score equals `k`,
+        exposed for display; scoring itself goes through `as_baseline()` so
+        both detectors run the identical test.
 
         Built on the cohort's median and MAD rather than a Tukey IQR fence.
         The IQR has a 25% breakdown point, so in a small cohort a single
@@ -106,6 +109,17 @@ class PeerBaseline:
         catch. Median/MAD tolerates up to half the cohort.
         """
         return self.center + k * self.dispersion / CONSISTENCY_CONSTANT
+
+    def as_baseline(self) -> "Baseline":
+        """Expose the cohort as a Baseline so `score_value` can be reused.
+
+        The cohort distribution is heavy-tailed in the same way a merchant's
+        own is, so it takes the same robust test — and reporting the same
+        modified z-score keeps the two detectors comparable in the divergence
+        panel instead of mixing a z-score with a ratio.
+        """
+        method = DispersionMethod.MAD if self.usable else DispersionMethod.INSUFFICIENT_DATA
+        return Baseline(self.center, self.dispersion, method, self.n_merchants)
 
 
 @dataclass(frozen=True)
