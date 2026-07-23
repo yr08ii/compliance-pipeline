@@ -4,7 +4,7 @@ import Dashboard from "./screens/Dashboard";
 import AlertQueue from "./screens/AlertQueue";
 import CaseReview from "./screens/CaseReview";
 import FollowThrough from "./screens/FollowThrough";
-import ModelHealth from "./screens/ModelHealth";
+import ModelInfo from "./screens/ModelInfo";
 import Baselines from "./screens/Baselines";
 import { apiGet, type AlertOut } from "./api/client";
 import { cn } from "./lib/utils";
@@ -14,7 +14,7 @@ const nav = [
   { to: "/queue", label: "Alert queue" },
   { to: "/cases", label: "Case follow-through" },
   { to: "/baselines", label: "Baselines" },
-  { to: "/health", label: "Model health" },
+  { to: "/model", label: "Model info" },
 ];
 
 export default function App() {
@@ -83,7 +83,7 @@ export default function App() {
             <div className="mb-8 flex flex-col gap-4 border-b border-slate-200/70 pb-6 lg:flex-row lg:items-end lg:justify-between">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Operations view</p>
-                <h2 className="mt-2 text-[2.15rem] leading-tight text-balance text-slate-950">Queue, review, & model health in one place.</h2>
+                <h2 className="mt-2 text-[2.15rem] leading-tight text-balance text-slate-950">Queue, review, and model insight in one place.</h2>
               </div>
               <div className="grid grid-cols-2 gap-3 text-[0.9rem] text-slate-600 sm:text-[0.95rem]">
                 <div className="soft-panel rounded-2xl px-4 py-3 text-center">
@@ -104,7 +104,7 @@ export default function App() {
               <Route path="/case/:id" element={<CaseReview />} />
               <Route path="/cases" element={<FollowThrough />} />
               <Route path="/baselines" element={<Baselines />} />
-            <Route path="/health" element={<ModelHealth />} />
+            <Route path="/model" element={<ModelInfo />} />
             </Routes>
           </main>
         </div>

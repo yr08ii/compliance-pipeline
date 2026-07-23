@@ -4,7 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
 from compliance.models import Alert, Merchant, MerchantProfile
-from compliance.schemas import AlertOut, BaselineOverview, BaselineRow
+from compliance import glossary
+from compliance.schemas import (
+    AlertOut,
+    BaselineOverview,
+    BaselineRow,
+    Glossary,
+)
 
 
 def create_app() -> FastAPI:
@@ -13,6 +19,20 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/glossary", response_model=Glossary)
+    def read_glossary() -> Glossary:
+        """Plain-English names for the internal identifiers.
+
+        Served from the backend so the labels sit beside the detectors they
+        describe and cannot drift from them.
+        """
+        return Glossary(
+            detectors=glossary.as_dicts(glossary.DETECTORS),
+            features=glossary.as_dicts(glossary.FEATURES),
+            lanes=glossary.as_dicts(glossary.LANES),
+            baseline_methods=glossary.as_dicts(glossary.BASELINE_METHODS),
+        )
 
     @app.get("/api/baselines", response_model=BaselineOverview)
     def baseline_overview(session: Session = Depends(get_session)) -> BaselineOverview:

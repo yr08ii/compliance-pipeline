@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiGet, type AlertOut } from "../api/client";
+import { useGlossary } from "../api/glossary";
 
 function laneTone(lane: string) {
   return lane === "A"
@@ -9,6 +10,7 @@ function laneTone(lane: string) {
 }
 
 export default function AlertQueue() {
+  const g = useGlossary();
   const [alerts, setAlerts] = useState<AlertOut[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,7 +42,7 @@ export default function AlertQueue() {
             <tr>
               <th className="px-5 py-4 font-medium">Rank</th>
               <th className="px-5 py-4 font-medium">Merchant</th>
-              <th className="px-5 py-4 font-medium">Lane</th>
+              <th className="px-5 py-4 font-medium">Group</th>
               <th className="px-5 py-4 font-medium">Score</th>
               <th className="px-5 py-4 font-medium" />
             </tr>
@@ -51,11 +53,11 @@ export default function AlertQueue() {
                 <td className="px-5 py-4 font-medium text-slate-950">{a.rank}</td>
                 <td className="px-5 py-4">
                   <div className="font-medium text-slate-950">{a.merchant_id}</div>
-                  <div className="mt-1 text-xs text-slate-500">{a.triggering_detectors[0]?.detector ?? "risk signal"}</div>
+                  <div className="mt-1 text-xs text-slate-500">{a.triggering_detectors[0] ? g.detector(a.triggering_detectors[0].detector) : "Risk signal"}</div>
                 </td>
                 <td className="px-5 py-4">
                   <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${laneTone(a.lane)}`}>
-                    Lane {a.lane}
+                    {g.lane(a.lane)}
                   </span>
                 </td>
                 <td className="px-5 py-4 font-medium tabular-nums text-slate-900">{a.blended_score.toFixed(2)}</td>
