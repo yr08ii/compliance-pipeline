@@ -21,6 +21,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/baselines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Baseline Overview
+         * @description What every merchant's baseline is currently built from.
+         *
+         *     The lag means a specific past day rolls into the window on the next
+         *     run; `next_inclusion_date` names it, so the team can see which day is
+         *     still open for review before it becomes part of normal.
+         */
+        get: operations["baseline_overview_api_baselines_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts": {
         parameters: {
             query?: never;
@@ -80,6 +104,62 @@ export interface components {
             triggering_detectors: components["schemas"]["DetectorHit"][];
             /** Feature Snapshot */
             feature_snapshot: components["schemas"]["FeatureDivergence"][];
+        };
+        /**
+         * BaselineOverview
+         * @description What the baselines are built from, and what changes next run.
+         */
+        BaselineOverview: {
+            /** Window Start */
+            window_start: string | null;
+            /** Window End */
+            window_end: string | null;
+            /** Window Days */
+            window_days: number;
+            /** Lag Days */
+            lag_days: number;
+            /** Next Inclusion Date */
+            next_inclusion_date: string | null;
+            /** Total Count */
+            total_count: number;
+            /** Usable Count */
+            usable_count: number;
+            /** Quarantined Total */
+            quarantined_total: number;
+            /** Merchants */
+            merchants: components["schemas"]["BaselineRow"][];
+        };
+        /**
+         * BaselineRow
+         * @description One merchant's baseline provenance.
+         */
+        BaselineRow: {
+            /** Merchant Id */
+            merchant_id: string;
+            /** Mcc */
+            mcc: string | null;
+            /** Lane */
+            lane: string;
+            /** Method */
+            method: string;
+            /** Usable */
+            usable: boolean;
+            /** Center */
+            center: number | null;
+            /** Observations */
+            observations: number;
+            /** Quarantined Days */
+            quarantined_days: number;
+            /** Peer Merchants */
+            peer_merchants: number;
+            /** Peer Usable */
+            peer_usable: boolean;
+            /** Volume Usable */
+            volume_usable: boolean;
+            /** Velocity Usable */
+            velocity_usable: boolean;
+            /** Is Ramp */
+            is_ramp: boolean;
         };
         /** DetectorHit */
         DetectorHit: {
@@ -144,6 +224,26 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+        };
+    };
+    baseline_overview_api_baselines_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BaselineOverview"];
                 };
             };
         };
