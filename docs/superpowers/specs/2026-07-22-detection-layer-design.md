@@ -283,12 +283,15 @@ Every number here is a *starting point* set against synthetic data and re-tuned 
 
 ## 10. Build order (feeds the next implementation plan)
 
-0. **Ingest the real schema** (§0.1) — widen the model, drop `terminal_id`, resolve refund encoding. Prerequisite for everything below.
+0. ~~**Ingest the real schema**~~ — **done.** Model widened to §0.1, `terminal_id` dropped, JSON parser behind a format-agnostic boundary, idempotent on `payment_id`. Refunds honoured from either a status or a negative amount pending the confirmed encoding (open question Q1).
 1. ~~**Robust amount baseline**~~ — **done.** Median/MAD + modified z, with the MAD=0 / min-observations / min-span guards, wired through stages 2–4.
 2. ~~**Peer baselines**~~ — **done.** Both peer questions (§3.4), scored with the same modified z.
-2a. ~~**Baseline integrity**~~ — **done.** Lag, `TRUE_POSITIVE` quarantine, trend detector, peer cohorts (§3.4a). Still open: the Stage-2 **backfill mode**.
+2a. ~~**Baseline integrity**~~ — **done.** Lag, `TRUE_POSITIVE` quarantine, trend detector, peer cohorts (§3.4a), and the backfill command (once-off, no UI, prints its own provisional caveat).
 2b. ~~**Volume and speed**~~ — **done.** Daily count (self and peer) and peak hourly rate (§3.3a).
-2c. **Baseline provenance UI** — **done.** Window bounds, next inclusion date, coverage, withheld days.
+2c. ~~**Baseline provenance UI**~~ — **done.** Window bounds, next inclusion date, coverage, withheld days.
+2d. ~~**Time and card-origin baselines**~~ — **done** (§3.2, §3.3). Hour-of-day smooths circularly; origin uses Laplace-smoothed surprisal so an unseen country is improbable rather than impossible, and a merchant that always sees foreign cards is not flagged for foreignness.
+
+**Family A is complete.** Next: Family B (the typology ruleset, which is what Lane B merchants still lack) and Family C (ring detection, for which the merchant identity hashes are now ingested).
 3. **Time (circular KDE) and card-origin** baselines; festive-calendar context.
 4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement, declared-vs-actual mismatch, decline-ratio).
 5. **Merchant-identity rings** (§5.1) — equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation. Cheap, in-scope, no card data. Build here, not last.
