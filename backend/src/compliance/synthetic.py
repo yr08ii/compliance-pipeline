@@ -30,6 +30,7 @@ NEWBIE = "NEWBIE"  # too little history — belongs in Lane B
 RAMP = "RAMP"  # grows a few percent daily — invisible to a self-baseline
 PEER_OUT = "PEEROUT"  # stable for itself, far above its cohort
 FLOOD = "FLOOD"  # ordinary tickets, but a sudden burst of them
+BURST = "BURST"  # ordinary daily total, all of it in minutes
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,9 @@ SPECS = (
     MerchantSpec(RAMP, "5814", "Central", 60.0, 12.0, 5, 90, daily_growth=0.04),
     # Every ticket is unremarkable; only the COUNT gives it away.
     MerchantSpec(FLOOD, "5411", "Mong Kok", 115.0, 20.0, 5, 90),
+    # Same number of transactions as any day, but crammed into one
+    # hour. Daily volume looks normal; only the rate exposes it.
+    MerchantSpec(BURST, "5944", "Central", 2900.0, 300.0, 12, 90),
 )
 
 # The injected anomaly: a ticket far outside SPIKE's own normal, on the day
@@ -128,7 +132,12 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                         merchant_id=spec.merchant_id,
                         total_amount=amount,
                         net_amount=round(amount * 0.97, 2),
-                        occurred_at=occurred_day + timedelta(hours=9 + n),
+                        occurred_at=occurred_day
+                        + (
+                            timedelta(hours=10, minutes=n * 4)
+                            if spec.merchant_id == BURST and day == 0
+                            else timedelta(hours=(9 + n) % 24)
+                        ),
                         is_refund=False,
                         card_bin="457896",
                         geo=spec.subdistrict,

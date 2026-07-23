@@ -17,7 +17,9 @@ from compliance.detection.windows import (
     fit_peer_transaction_baselines,
     fit_peer_volume_baselines,
     fit_trend,
+    fit_velocity_baselines,
     fit_volume_baselines,
+    daily_peak_rate,
     daily_counts_in_window,
     quarantined_days,
 )
@@ -44,6 +46,21 @@ def _txn(session, merchant_id, amount, days_before):
             merchant_id=merchant_id,
             total_amount=amount,
             occurred_at=AS_OF - timedelta(days=days_before),
+            is_refund=False,
+        )
+    )
+
+
+def _txn_at(session, merchant_id, amount, days_before, hour, minute=0):
+    _seq[0] += 1
+    session.add(
+        Transaction(
+            source_txn_id=f"BV{_seq[0]:07d}",
+            merchant_id=merchant_id,
+            total_amount=amount,
+            occurred_at=(AS_OF - timedelta(days=days_before)).replace(
+                hour=hour, minute=minute
+            ),
             is_refund=False,
         )
     )
@@ -351,3 +368,42 @@ class TestVolumeBaseline:
         assert cohort.usable
         assert score_value(200, cohort.as_baseline()).is_outlier is True
         assert score_value(5, cohort.as_baseline()).is_outlier is False
+
+
+class TestVelocity:
+    """Speed: how tightly transactions cluster in time. A structuring burst
+    puts many transactions through in minutes — a daily count smooths that
+    away, because the day's total can look ordinary."""
+
+    def test_measures_the_busiest_hour_of_each_day(self, session):
+        session.add(Merchant(merchant_id="S1", mcc="5411"))
+        # Six transactions, but spread one per hour: no burst.
+        for day in (1, 2):
+            for hour in range(6):
+                _txn_at(session, "S1", 100.0, day, hour)
+        session.flush()
+
+        assert daily_peak_rate(session, "S1", AS_OF, WINDOW) == [1, 1]
+
+    def test_a_burst_registers_as_peak_rate(self, session):
+        session.add(Merchant(merchant_id="S1", mcc="5411"))
+        for i in range(8):
+            _txn_at(session, "S1", 100.0, 1, 10, minute=i * 5)
+        session.flush()
+
+        assert daily_peak_rate(session, "S1", AS_OF, WINDOW) == [8]
+
+    def test_flags_a_burst_against_a_merchants_usual_pace(self, session):
+        session.add(Merchant(merchant_id="S1", mcc="5411"))
+        for day in range(2, 30):
+            for hour in range(4):
+                _txn_at(session, "S1", 100.0, day, hour * 4)
+        session.flush()
+
+        baseline = fit_velocity_baselines(
+            session, AS_OF, WINDOW, min_observations=12
+        )["S1"]
+
+        assert baseline.usable
+        assert score_value(20, baseline).is_outlier is True
+        assert score_value(2, baseline).is_outlier is False

@@ -15,11 +15,13 @@ from sqlalchemy.orm import Session
 from compliance.detection.baselines import Baseline, DispersionMethod, score_value
 from compliance.detection.windows import (
     _window_bounds,
+    _peak_rate,
     fit_all_baselines,
     fit_peer_baselines,
     fit_peer_transaction_baselines,
     fit_peer_volume_baselines,
     fit_trend,
+    fit_velocity_baselines,
     fit_volume_baselines,
     quarantined_days,
 )
@@ -47,6 +49,7 @@ PEER_MERCHANT_DETECTOR = "merchant_level_vs_mcc_peers"
 TREND_DETECTOR = "level_shift_ramp"
 VOLUME_DETECTOR = "count_vs_own_baseline"
 PEER_VOLUME_DETECTOR = "count_vs_mcc_peers"
+VELOCITY_DETECTOR = "burst_rate_vs_own_baseline"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -78,6 +81,9 @@ def profile(session: Session, *, as_of: datetime) -> None:
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
     peer_volumes = fit_peer_volume_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
+    velocities = fit_velocity_baselines(
+        session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
+    )
     quarantined = quarantined_days(session)
     window_start, window_end = _window_bounds(as_of, WINDOW_DAYS, LAG_DAYS)
 
@@ -86,6 +92,7 @@ def profile(session: Session, *, as_of: datetime) -> None:
         peer = peers.get(merchant.mcc) if merchant else None
         peer_txn = peer_txns.get(merchant.mcc) if merchant else None
         volume = volumes.get(merchant_id)
+        velocity = velocities.get(merchant_id)
         peer_volume = peer_volumes.get(merchant.mcc) if merchant else None
         trend = fit_trend(
             session,
@@ -128,6 +135,9 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "volume_center": volume.center if volume else None,
                     "volume_dispersion": volume.dispersion if volume else None,
                     "volume_usable": bool(volume and volume.usable),
+                    "velocity_center": velocity.center if velocity else None,
+                    "velocity_dispersion": velocity.dispersion if velocity else None,
+                    "velocity_usable": bool(velocity and velocity.usable),
                     "peer_volume_center": peer_volume.center if peer_volume else None,
                     "peer_volume_dispersion": peer_volume.dispersion if peer_volume else None,
                     "peer_volume_usable": bool(peer_volume and peer_volume.usable),
@@ -168,6 +178,22 @@ def _scored_day_amounts(session: Session, merchant_id: str, as_of: datetime) -> 
             )
         )
     )
+
+
+def _scored_day_peak_rate(
+    session: Session, merchant_id: str, as_of: datetime, window_minutes: int = 60
+) -> float:
+    """Busiest `window_minutes` on the day being scored."""
+    stamps = list(
+        session.scalars(
+            select(Transaction.occurred_at).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= as_of,
+                Transaction.is_refund.is_(False),
+            )
+        )
+    )
+    return float(_peak_rate(stamps, window_minutes))
 
 
 def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[dict]:
@@ -240,6 +266,33 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "deviation": round(pv_score.deviation, 2),
                     },
                 })
+
+        # Speed: how tightly today's transactions cluster. A structuring
+        # burst can put many through in minutes while the day's total stays
+        # unremarkable, so daily volume alone would miss it.
+        if p.metrics.get("velocity_usable"):
+            today_peak = _scored_day_peak_rate(session, p.merchant_id, as_of)
+            if today_peak:
+                own_vel = Baseline(
+                    center=p.metrics["velocity_center"],
+                    dispersion=p.metrics["velocity_dispersion"],
+                    method=DispersionMethod.MAD,
+                    n=p.metrics["baseline_n"],
+                )
+                vel_score = score_value(today_peak, own_vel)
+                if vel_score.is_outlier:
+                    hits.append({
+                        "merchant_id": p.merchant_id,
+                        "lane": lanes.get(p.merchant_id, "B"),
+                        "detector": VELOCITY_DETECTOR,
+                        "sub_score": min(vel_score.deviation / 10.0, 1.0),
+                        "feature": {
+                            "feature_name": "peak_transactions_per_hour",
+                            "merchant_value": today_peak,
+                            "baseline_value": own_vel.center,
+                            "deviation": round(vel_score.deviation, 2),
+                        },
+                    })
 
         # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
         # This is the one that covers cold start: a median does not move for a

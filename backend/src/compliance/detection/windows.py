@@ -322,6 +322,106 @@ def fit_peer_volume_baselines(
     return cohorts
 
 
+def _peak_rate(stamps: list[datetime], window_minutes: int) -> int:
+    """The most transactions falling inside any window of that length.
+
+    A sliding window over sorted timestamps, so a burst is measured wherever
+    it happens rather than against clock-hour boundaries that could split it
+    in half.
+    """
+    if not stamps:
+        return 0
+    ordered = sorted(stamps)
+    span = timedelta(minutes=window_minutes)
+    peak = 1
+    start = 0
+    for end in range(len(ordered)):
+        # Half-open [t, t+span), matching every other window in this module:
+        # transactions exactly one span apart fall in different windows.
+        while ordered[end] - ordered[start] >= span:
+            start += 1
+        peak = max(peak, end - start + 1)
+    return peak
+
+
+def daily_peak_rate(
+    session: Session,
+    merchant_id: str,
+    as_of: datetime,
+    window_days: int,
+    lag_days: int = 0,
+    window_minutes: int = 60,
+) -> list[int]:
+    """Per active day, the busiest `window_minutes` that day."""
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = list(
+        session.scalars(
+            select(Transaction.occurred_at).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
+                Transaction.is_refund.is_(False),
+            )
+        )
+    )
+    per_day: dict[date, list[datetime]] = {}
+    for occurred_at in rows:
+        per_day.setdefault(occurred_at.date(), []).append(occurred_at)
+    return [_peak_rate(per_day[day], window_minutes) for day in sorted(per_day)]
+
+
+def fit_velocity_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    min_observations: int,
+    lag_days: int = 0,
+    window_minutes: int = 60,
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit each merchant's baseline for how tightly it transacts in time.
+
+    Distinct from daily volume: a structuring burst can put many transactions
+    through in minutes while the day's total stays unremarkable. Only the
+    within-day rate exposes that shape.
+    """
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(Transaction.merchant_id, Transaction.occurred_at)
+        .where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+        .order_by(Transaction.merchant_id, Transaction.occurred_at)
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    per_merchant: dict[str, dict[date, list[datetime]]] = {}
+    for merchant_id, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        per_merchant.setdefault(merchant_id, {}).setdefault(
+            occurred_at.date(), []
+        ).append(occurred_at)
+
+    def _fit(merchant_id: str) -> Baseline:
+        days = per_merchant.get(merchant_id, {})
+        peaks = [float(_peak_rate(days[d], window_minutes)) for d in sorted(days)]
+        return fit_baseline(
+            peaks,
+            min_observations=min_observations,
+            min_dispersion=MIN_COUNT_DISPERSION,
+        )
+
+    return {
+        merchant_id: _fit(merchant_id)
+        for merchant_id in session.scalars(select(Merchant.merchant_id))
+    }
+
+
 def _capped(values: list[float], cap: int) -> list[float]:
     """Evenly sample down to `cap` items, deterministically.
 
