@@ -21,6 +21,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/glossary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Glossary
+         * @description Plain-English names for the internal identifiers.
+         *
+         *     Served from the backend so the labels sit beside the detectors they
+         *     describe and cannot drift from them.
+         */
+        get: operations["read_glossary_api_glossary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/baselines": {
         parameters: {
             query?: never;
@@ -179,6 +202,34 @@ export interface components {
             /** Deviation */
             deviation: number;
         };
+        /**
+         * Glossary
+         * @description Every identifier that can reach a person, translated.
+         */
+        Glossary: {
+            /** Detectors */
+            detectors: components["schemas"]["GlossaryTerm"][];
+            /** Features */
+            features: components["schemas"]["GlossaryTerm"][];
+            /** Lanes */
+            lanes: components["schemas"]["GlossaryTerm"][];
+            /** Baseline Methods */
+            baseline_methods: components["schemas"]["GlossaryTerm"][];
+        };
+        /**
+         * GlossaryTerm
+         * @description One internal identifier and its plain-English rendering.
+         */
+        GlossaryTerm: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Meaning */
+            meaning: string;
+            /** Compared Against */
+            compared_against: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -224,6 +275,26 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+        };
+    };
+    read_glossary_api_glossary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Glossary"];
                 };
             };
         };

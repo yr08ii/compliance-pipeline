@@ -56,3 +56,21 @@ class BaselineOverview(BaseModel):
     usable_count: int
     quarantined_total: int
     merchants: list[BaselineRow]
+
+
+class GlossaryTerm(BaseModel):
+    """One internal identifier and its plain-English rendering."""
+
+    key: str
+    label: str
+    meaning: str
+    compared_against: str
+
+
+class Glossary(BaseModel):
+    """Every identifier that can reach a person, translated."""
+
+    detectors: list[GlossaryTerm]
+    features: list[GlossaryTerm]
+    lanes: list[GlossaryTerm]
+    baseline_methods: list[GlossaryTerm]

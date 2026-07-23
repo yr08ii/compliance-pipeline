@@ -1,12 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiGet, type BaselineOverview, type BaselineRow } from "../api/client";
-
-const METHOD_LABEL: Record<string, string> = {
-  mad: "Median + MAD",
-  scaled_iqr: "Scaled IQR",
-  constant: "Fixed price",
-  insufficient_data: "Not enough history",
-};
+import { useGlossary } from "../api/glossary";
 
 function shortDate(iso: string | null | undefined) {
   return iso ? iso.slice(0, 10) : "—";
@@ -46,6 +40,7 @@ function Coverage({ row }: { row: BaselineRow }) {
 }
 
 export default function Baselines() {
+  const g = useGlossary();
   const [data, setData] = useState<BaselineOverview | null>(null);
   const [error, setError] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
@@ -108,8 +103,8 @@ export default function Baselines() {
           <thead className="border-b border-slate-200/80 bg-slate-50/80 text-xs uppercase tracking-[0.18em] text-slate-500">
             <tr>
               <th className="px-5 py-4 font-medium">Merchant</th>
-              <th className="px-5 py-4 font-medium">Lane</th>
-              <th className="px-5 py-4 font-medium">Method</th>
+              <th className="px-5 py-4 font-medium">Group</th>
+              <th className="px-5 py-4 font-medium">Baseline</th>
               <th className="px-5 py-4 font-medium">Days</th>
               <th className="px-5 py-4 font-medium">Detectors</th>
             </tr>
@@ -134,11 +129,11 @@ export default function Baselines() {
                           : "border-amber-200 bg-amber-50 text-amber-700"
                       }`}
                     >
-                      Lane {row.lane}
+                      {g.lane(row.lane)}
                     </span>
                   </td>
                   <td className="px-5 py-4 text-slate-700">
-                    {METHOD_LABEL[row.method] ?? row.method}
+                    {g.method(row.method)}
                   </td>
                   <td className="px-5 py-4 tabular-nums text-slate-700">
                     {row.observations}
