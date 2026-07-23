@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import (
     MIN_COHORT_MERCHANTS,
+    MIN_COUNT_DISPERSION,
     Baseline,
     PeerBaseline,
     Trend,
@@ -190,6 +191,134 @@ def fit_peer_baselines(
     for mcc, members in per_merchant.items():
         centers = [_median(values) for values in members.values() if values]
         cohorts[mcc] = fit_peer_baseline(centers, n_merchants=len(centers))
+    return cohorts
+
+
+def _daily_counts(rows: list[datetime]) -> list[int]:
+    """Transactions per active day.
+
+    Only days the merchant actually traded are counted. Padding quiet days
+    with zeros would drag a sporadic merchant's median to zero and make every
+    trading day an outlier; a merchant waking up after a long silence is the
+    dormant-reactivation typology, handled by rules rather than here.
+    """
+    per_day: dict[date, int] = {}
+    for occurred_at in rows:
+        per_day[occurred_at.date()] = per_day.get(occurred_at.date(), 0) + 1
+    return [per_day[day] for day in sorted(per_day)]
+
+
+def daily_counts_in_window(
+    session: Session,
+    merchant_id: str,
+    as_of: datetime,
+    window_days: int,
+    lag_days: int = 0,
+) -> list[int]:
+    """One transaction count per active day, for the lagged baseline window."""
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = list(
+        session.scalars(
+            select(Transaction.occurred_at).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
+                Transaction.is_refund.is_(False),
+            )
+        )
+    )
+    return _daily_counts(rows)
+
+
+def fit_volume_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    min_observations: int,
+    lag_days: int = 0,
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit each merchant's daily transaction-count baseline.
+
+    Transacting far more than usual is a signal in its own right, independent
+    of ticket size — and it is what makes cohort manipulation self-defeating:
+    the volume needed to drag a peer distribution is itself an outlier here.
+    """
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(Transaction.merchant_id, Transaction.occurred_at)
+        .where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+        .order_by(Transaction.merchant_id, Transaction.occurred_at)
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    times: dict[str, list[datetime]] = {}
+    for merchant_id, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        times.setdefault(merchant_id, []).append(occurred_at)
+
+    return {
+        merchant_id: fit_baseline(
+            [float(c) for c in _daily_counts(times.get(merchant_id, []))],
+            min_observations=min_observations,
+            min_dispersion=MIN_COUNT_DISPERSION,
+        )
+        for merchant_id in session.scalars(select(Merchant.merchant_id))
+    }
+
+
+def fit_peer_volume_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    lag_days: int = 0,
+    exclude_quarantined: bool = True,
+) -> dict[str, PeerBaseline]:
+    """Fit each cohort's distribution of typical daily transaction counts.
+
+    One vote per merchant, so the answer to "is this merchant transacting far
+    more than its peers?" cannot be skewed by the very merchant being asked
+    about.
+    """
+    from statistics import median as _median
+
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(Merchant.mcc, Transaction.merchant_id, Transaction.occurred_at)
+        .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
+        .where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    times: dict[str, dict[str, list[datetime]]] = {}
+    for mcc, merchant_id, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        times.setdefault(mcc, {}).setdefault(merchant_id, []).append(occurred_at)
+
+    cohorts: dict[str, PeerBaseline] = {}
+    for mcc, members in times.items():
+        centers = [
+            _median(_daily_counts(stamps)) for stamps in members.values() if stamps
+        ]
+        cohorts[mcc] = fit_peer_baseline(
+            [float(c) for c in centers],
+            n_merchants=len(centers),
+            min_dispersion=MIN_COUNT_DISPERSION,
+        )
     return cohorts
 
 

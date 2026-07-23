@@ -15,7 +15,10 @@ from compliance.detection.windows import (
     fit_all_baselines,
     fit_peer_baselines,
     fit_peer_transaction_baselines,
+    fit_peer_volume_baselines,
     fit_trend,
+    fit_volume_baselines,
+    daily_counts_in_window,
     quarantined_days,
 )
 from compliance.models import Alert, Base, Disposition, Merchant, Transaction
@@ -295,3 +298,56 @@ class TestPeerTransactionBaseline:
 
         assert cohort.center < 500.0, "a single loud merchant captured the cohort"
         assert score_value(9_000.0, cohort).is_outlier is True
+
+
+class TestVolumeBaseline:
+    """Transacting far more than you normally do, or far more than your peers,
+    is its own signal — and the one that makes cohort manipulation visible.
+    You cannot pump enough volume to drag a cohort median without the volume
+    itself becoming an outlier."""
+
+    def test_daily_counts_are_measured_per_active_day(self, session):
+        session.add(Merchant(merchant_id="V1", mcc="5411"))
+        for day in range(1, 11):
+            for _ in range(4):
+                _txn(session, "V1", 100.0, day)
+        session.flush()
+
+        counts = daily_counts_in_window(session, "V1", AS_OF, WINDOW)
+
+        assert counts == [4] * 10
+
+    def test_flags_a_merchant_transacting_far_more_than_usual(self, session):
+        session.add(Merchant(merchant_id="V1", mcc="5411"))
+        for day in range(2, 30):
+            for _ in range(4):
+                _txn(session, "V1", 100.0, day)
+        session.flush()
+
+        baseline = fit_volume_baselines(
+            session, AS_OF, WINDOW, min_observations=12
+        )["V1"]
+
+        assert baseline.usable
+        assert score_value(60, baseline).is_outlier is True
+        assert score_value(5, baseline).is_outlier is False
+
+    def test_volume_cohort_flags_a_merchant_swamping_its_peers(self, session):
+        """The merchant attempting to dominate its cohort's amount
+        distribution is caught here instead."""
+        for i in range(5):
+            session.add(Merchant(merchant_id=f"Q{i}", mcc="5814"))
+            for day in range(1, 25):
+                for _ in range(3 + i):
+                    _txn(session, f"Q{i}", 50.0, day)
+        session.add(Merchant(merchant_id="FLOOD", mcc="5814"))
+        for day in range(1, 25):
+            for _ in range(200):
+                _txn(session, "FLOOD", 50.0, day)
+        session.flush()
+
+        cohort = fit_peer_volume_baselines(session, AS_OF, WINDOW)["5814"]
+
+        assert cohort.usable
+        assert score_value(200, cohort.as_baseline()).is_outlier is True
+        assert score_value(5, cohort.as_baseline()).is_outlier is False

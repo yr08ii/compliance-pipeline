@@ -138,6 +138,8 @@ class Trend:
 
 
 MIN_COHORT_MERCHANTS = 3
+# One transaction: the smallest meaningful spread in a daily count.
+MIN_COUNT_DISPERSION = 1.0
 RAMP_RATIO = 1.75
 
 
@@ -160,17 +162,25 @@ def _quartiles(ordered: list[float]) -> tuple[float, float]:
     return median(lower), median(upper)
 
 
-def fit_peer_baseline(centers: list[float], *, n_merchants: int) -> PeerBaseline:
+def fit_peer_baseline(
+    centers: list[float], *, n_merchants: int, min_dispersion: float = 0.0
+) -> PeerBaseline:
     """Fit a cohort distribution from its members' typical tickets.
 
     Takes one value per merchant, not pooled transactions: pooling weights
     members by transaction volume, letting a single high-volume merchant
     dominate its own cohort.
+
+    `min_dispersion` floors the spread for integer quantities: a cohort whose
+    members all trade a similar number of times a day has zero dispersion,
+    which is ordinary rather than degenerate. Without the floor the cohort is
+    unusable and a cold-start merchant flooding transactions has nothing
+    watching it.
     """
     if not centers:
         return PeerBaseline(0.0, 0.0, 0.0, 0.0, n_merchants, 0)
     center = median(centers)
-    dispersion = median([abs(c - center) for c in centers])
+    dispersion = max(median([abs(c - center) for c in centers]), min_dispersion)
     q1, q3 = _quartiles(sorted(centers))
     return PeerBaseline(center, dispersion, q1, q3, n_merchants, len(centers))
 
@@ -187,12 +197,21 @@ def detect_ramp(short_center: float, long_center: float, *, ratio: float = RAMP_
     return Trend(short_center, long_center, observed, observed >= ratio)
 
 
-def fit_baseline(values: list[float], *, min_observations: int) -> Baseline:
+def fit_baseline(
+    values: list[float], *, min_observations: int, min_dispersion: float = 0.0
+) -> Baseline:
     """Fit a robust baseline over one merchant's rolling window.
 
     Falls back through three levels of dispersion so a degenerate window can
     never produce a divide-by-zero score:
       MAD -> scaled IQR -> constant (unusable).
+
+    `min_dispersion` floors the spread for quantities that have a natural
+    smallest meaningful unit. Daily transaction *counts* need this: a perfectly
+    regular merchant has zero dispersion, which is common rather than
+    pathological, and would otherwise be unscoreable — leaving a jump from four
+    transactions a day to sixty invisible. One transaction is the floor there.
+    Amounts pass 0.0 and keep the strict fallback.
     """
     n = len(values)
     if n < min_observations:
@@ -206,18 +225,22 @@ def fit_baseline(values: list[float], *, min_observations: int) -> Baseline:
     center = median(values)
     mad = median([abs(v - center) for v in values])
     if mad > 0:
-        return Baseline(center, mad, DispersionMethod.MAD, n)
+        return Baseline(center, max(mad, min_dispersion), DispersionMethod.MAD, n)
 
     # More than half the window sits on one value, so MAD collapsed. There may
     # still be real spread in the tails — measure it with the IQR instead.
     q1, q3 = _quartiles(sorted(values))
     iqr = q3 - q1
     if iqr > 0:
-        return Baseline(center, iqr * IQR_TO_MAD, DispersionMethod.SCALED_IQR, n)
+        return Baseline(
+            center, max(iqr * IQR_TO_MAD, min_dispersion), DispersionMethod.SCALED_IQR, n
+        )
 
-    # Genuinely constant history: every robust measure of spread is zero.
-    # Scoring this would divide by zero and flag every transaction, so we
-    # refuse and let a rule handle it.
+    # Genuinely constant history. If the quantity has a natural smallest
+    # unit, use it; otherwise refuse to score and let a rule handle it, rather
+    # than dividing by zero and flagging everything.
+    if min_dispersion > 0:
+        return Baseline(center, min_dispersion, DispersionMethod.MAD, n)
     return Baseline(center, 0.0, DispersionMethod.CONSTANT, n)
 
 

@@ -29,6 +29,7 @@ FIXED = "FIXED"  # mature, one fixed price — degenerate baseline
 NEWBIE = "NEWBIE"  # too little history — belongs in Lane B
 RAMP = "RAMP"  # grows a few percent daily — invisible to a self-baseline
 PEER_OUT = "PEEROUT"  # stable for itself, far above its cohort
+FLOOD = "FLOOD"  # ordinary tickets, but a sudden burst of them
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ SPECS = (
     # 4% a day compounds to ~10x over 60 days, yet no single day is an
     # outlier against its own trailing window.
     MerchantSpec(RAMP, "5814", "Central", 60.0, 12.0, 5, 90, daily_growth=0.04),
+    # Every ticket is unremarkable; only the COUNT gives it away.
+    MerchantSpec(FLOOD, "5411", "Mong Kok", 115.0, 20.0, 5, 90),
 )
 
 # The injected anomaly: a ticket far outside SPIKE's own normal, on the day
@@ -101,11 +104,15 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
         )
 
         for day in range(spec.history_days, -1, -1):
+            # A burst of ordinary-sized tickets on the scored day.
+            per_day = spec.txns_per_day
+            if spec.merchant_id == FLOOD and day == 0:
+                per_day = spec.txns_per_day * 12
             occurred_day = as_of - timedelta(days=day)
             # `day` counts backwards, so elapsed time is history_days - day.
             growth = (1.0 + spec.daily_growth) ** (spec.history_days - day)
 
-            for n in range(spec.txns_per_day):
+            for n in range(per_day):
                 counter += 1
                 amount = round(_ticket(rng, spec) * growth, 2)
 

@@ -18,7 +18,9 @@ from compliance.detection.windows import (
     fit_all_baselines,
     fit_peer_baselines,
     fit_peer_transaction_baselines,
+    fit_peer_volume_baselines,
     fit_trend,
+    fit_volume_baselines,
     quarantined_days,
 )
 from compliance.models import Alert, Merchant, MerchantProfile, Transaction
@@ -43,6 +45,8 @@ AMOUNT_DETECTOR = "amount_vs_own_baseline"
 PEER_TXN_DETECTOR = "ticket_vs_mcc_peers"
 PEER_MERCHANT_DETECTOR = "merchant_level_vs_mcc_peers"
 TREND_DETECTOR = "level_shift_ramp"
+VOLUME_DETECTOR = "count_vs_own_baseline"
+PEER_VOLUME_DETECTOR = "count_vs_mcc_peers"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -70,6 +74,10 @@ def profile(session: Session, *, as_of: datetime) -> None:
     peer_txns = fit_peer_transaction_baselines(
         session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
     )
+    volumes = fit_volume_baselines(
+        session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
+    )
+    peer_volumes = fit_peer_volume_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
     quarantined = quarantined_days(session)
     window_start, window_end = _window_bounds(as_of, WINDOW_DAYS, LAG_DAYS)
 
@@ -77,6 +85,8 @@ def profile(session: Session, *, as_of: datetime) -> None:
         merchant = session.get(Merchant, merchant_id)
         peer = peers.get(merchant.mcc) if merchant else None
         peer_txn = peer_txns.get(merchant.mcc) if merchant else None
+        volume = volumes.get(merchant_id)
+        peer_volume = peer_volumes.get(merchant.mcc) if merchant else None
         trend = fit_trend(
             session,
             merchant_id,
@@ -115,6 +125,12 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "peer_txn_center": peer_txn.center if peer_txn else None,
                     "peer_txn_dispersion": peer_txn.dispersion if peer_txn else None,
                     "peer_txn_usable": bool(peer_txn and peer_txn.usable),
+                    "volume_center": volume.center if volume else None,
+                    "volume_dispersion": volume.dispersion if volume else None,
+                    "volume_usable": bool(volume and volume.usable),
+                    "peer_volume_center": peer_volume.center if peer_volume else None,
+                    "peer_volume_dispersion": peer_volume.dispersion if peer_volume else None,
+                    "peer_volume_usable": bool(peer_volume and peer_volume.usable),
                     "trend_ratio": round(trend.ratio, 3),
                     "trend_is_ramp": trend.is_ramp,
                 },
@@ -174,6 +190,56 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # cold-start merchant can be scored against — and the only one immune
         # to that merchant's own baseline being contaminated.
         day_amounts = _scored_day_amounts(session, p.merchant_id, as_of)
+
+        # Volume: transacting far more than usual, or far more than peers,
+        # is a signal in its own right — and it is what makes an attempt to
+        # drag a cohort's amount distribution self-defeating, since the volume
+        # required to move it is itself an outlier here.
+        day_count = float(len(day_amounts))
+
+        if p.metrics.get("volume_usable") and day_count:
+            own_vol = Baseline(
+                center=p.metrics["volume_center"],
+                dispersion=p.metrics["volume_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["baseline_n"],
+            )
+            vol_score = score_value(day_count, own_vol)
+            if vol_score.is_outlier:
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": VOLUME_DETECTOR,
+                    "sub_score": min(vol_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "daily_transaction_count",
+                        "merchant_value": day_count,
+                        "baseline_value": own_vol.center,
+                        "deviation": round(vol_score.deviation, 2),
+                    },
+                })
+
+        if p.metrics.get("peer_volume_usable") and day_count:
+            cohort_vol = Baseline(
+                center=p.metrics["peer_volume_center"],
+                dispersion=p.metrics["peer_volume_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["peer_merchants"],
+            )
+            pv_score = score_value(day_count, cohort_vol)
+            if pv_score.is_outlier:
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_VOLUME_DETECTOR,
+                    "sub_score": min(pv_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "daily_count_vs_mcc_peers",
+                        "merchant_value": day_count,
+                        "baseline_value": cohort_vol.center,
+                        "deviation": round(pv_score.deviation, 2),
+                    },
+                })
 
         # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
         # This is the one that covers cold start: a median does not move for a
