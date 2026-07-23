@@ -33,122 +33,130 @@ class Term:
 DETECTORS: tuple[Term, ...] = (
     Term(
         "amount_vs_own_baseline",
-        "Unusually large sale",
-        "A sale far bigger than this merchant's own typical sale.",
+        "Unusually large transaction",
+        "A transaction far larger than this merchant's typical transaction amount.",
         "Its own history",
     ),
     Term(
         "count_vs_own_baseline",
-        "Unusually busy day",
-        "Far more sales today than this merchant normally makes in a day.",
+        "Unusual number of transactions",
+        "Far more transactions today than this merchant normally processes in a day.",
         "Its own history",
     ),
     Term(
         "burst_rate_vs_own_baseline",
-        "Sudden burst of sales",
-        "Many sales crammed into a short window, well beyond this merchant's usual pace — "
-        "the day's total can look ordinary.",
+        "Unusual transaction velocity",
+        "Many transactions inside a single hour, well beyond this merchant's usual rate. "
+        "The day's total can still look ordinary.",
         "Its own history",
     ),
     Term(
         "level_shift_ramp",
-        "Steadily climbing",
-        "Takings have grown week after week. No single day looks odd, but the level has "
-        "shifted well above where it was.",
+        "Transaction amounts trending up",
+        "This merchant's typical transaction amount over the last 7 days is well above its "
+        "level over the last 90 days. No single day is unusual on its own.",
         "Its own history",
     ),
     Term(
         "hour_vs_own_pattern",
-        "Trading outside its usual hours",
-        "A sale at a time of day this merchant almost never trades.",
+        "Transaction outside usual hours",
+        "A transaction at a time of day this merchant almost never processes transactions.",
         "Its own history",
     ),
     Term(
         "card_origin_vs_own_mix",
-        "Unfamiliar card origin",
-        "Cards issued in a country this merchant rarely or never sees.",
+        "Unfamiliar card issuing country",
+        "Transactions on cards issued in a country this merchant rarely or never sees.",
         "Its own history",
     ),
     Term(
         "ticket_vs_mcc_peers",
-        "Large sale for this trade",
-        "A sale far bigger than merchants in the same line of business normally take.",
-        "Same trade",
+        "Large transaction for this category",
+        "A transaction far larger than merchants in the same category normally process.",
+        "Same merchant category",
     ),
     Term(
         "merchant_level_vs_mcc_peers",
-        "Prices out of line for its trade",
-        "This merchant's typical sale is far higher than others in the same line of "
-        "business — not one odd sale, but its whole price level.",
-        "Same trade",
+        "Typical amount high for this category",
+        "This merchant's typical transaction amount is far above others in the same "
+        "category. Not one transaction — its whole level.",
+        "Same merchant category",
     ),
     Term(
         "count_vs_mcc_peers",
-        "Busier than its trade",
-        "Far more sales today than merchants in the same line of business normally make.",
-        "Same trade",
+        "More transactions than its category",
+        "Far more transactions today than merchants in the same category normally process.",
+        "Same merchant category",
     ),
     Term(
         "hour_vs_mcc_peers",
-        "Trading when its trade is shut",
-        "A sale at a time of day this line of business almost never operates.",
-        "Same trade",
+        "Transaction outside category hours",
+        "A transaction at a time of day this merchant category almost never operates.",
+        "Same merchant category",
     ),
     Term(
         "ticket_vs_subdistrict_peers",
-        "Large sale for this area",
-        "A sale far bigger than merchants in the same district normally take.",
+        "Large transaction for this district",
+        "A transaction far larger than merchants in the same district normally process.",
         "Same district",
     ),
     Term(
         "foreign_card_ratio_vs_subdistrict",
-        "More overseas cards than its area",
-        "A far higher share of overseas-issued cards than other merchants in the same "
-        "district see.",
+        "Overseas card share high for district",
+        "A far higher share of transactions on overseas-issued cards than other merchants "
+        "in the same district.",
         "Same district",
     ),
 )
 
 
 FEATURES: tuple[Term, ...] = (
-    Term("ticket_amount", "Sale amount", "The value of a single sale.", ""),
-    Term("daily_transaction_count", "Sales today", "How many sales the merchant made.", ""),
-    Term("peak_transactions_per_hour", "Busiest hour",
-         "The most sales made within any single hour.", ""),
-    Term("level_shift_7d_vs_90d", "Recent vs long-run level",
-         "This week's typical sale against the last three months'.", ""),
-    Term("transaction_hour", "Time of sale", "When the sale happened, local time.", ""),
-    Term("hour_vs_trade_hours", "Time of sale", "When the sale happened, local time.", ""),
-    Term("typical_ticket_vs_mcc_peers", "Typical sale", "This merchant's usual sale value.", ""),
-    Term("ticket_vs_mcc_peers", "Sale amount", "The value of a single sale.", ""),
-    Term("ticket_vs_subdistrict_peers", "Sale amount", "The value of a single sale.", ""),
-    Term("daily_count_vs_mcc_peers", "Sales today", "How many sales the merchant made.", ""),
+    Term("ticket_amount", "Transaction amount",
+         "The value of a single transaction.", ""),
+    Term("daily_transaction_count", "Number of transactions",
+         "How many transactions the merchant processed that day.", ""),
+    Term("peak_transactions_per_hour", "Transactions per hour (peak)",
+         "The most transactions processed within any single hour — transaction velocity.", ""),
+    Term("level_shift_7d_vs_90d", "Typical amount: 7 days vs 90 days",
+         "Median transaction amount over the last 7 days, against the last 90.", ""),
+    Term("transaction_hour", "Time of transaction",
+         "When the transaction was processed, Hong Kong time.", ""),
+    Term("hour_vs_trade_hours", "Time of transaction",
+         "When the transaction was processed, Hong Kong time.", ""),
+    Term("typical_ticket_vs_mcc_peers", "Typical transaction amount",
+         "This merchant's median transaction amount.", ""),
+    Term("ticket_vs_mcc_peers", "Transaction amount",
+         "The value of a single transaction.", ""),
+    Term("ticket_vs_subdistrict_peers", "Transaction amount",
+         "The value of a single transaction.", ""),
+    Term("daily_count_vs_mcc_peers", "Number of transactions",
+         "How many transactions the merchant processed that day.", ""),
     Term("foreign_card_share_vs_district", "Overseas card share",
-         "The share of sales paid with cards issued outside Hong Kong.", ""),
+         "The share of transactions on cards issued outside Hong Kong.", ""),
 )
 
 
 LANES: tuple[Term, ...] = (
-    Term("A", "Established",
-         "Has enough trading history to be judged against its own past.",
+    Term("A", "Established history",
+         "Enough transaction history to be judged against its own past.",
          "Its own history and its peers"),
-    Term("B", "New or quiet",
-         "Too little history for a reliable pattern of its own, so it is judged against "
-         "similar merchants instead.",
+    Term("B", "Limited history",
+         "Too few transactions, or over too short a period, to judge against its own past. "
+         "Judged against similar merchants instead.",
          "Its peers only"),
 )
 
 
 BASELINE_METHODS: tuple[Term, ...] = (
-    Term("mad", "Established pattern",
-         "Enough varied history to describe what is normal for this merchant.", ""),
-    Term("scaled_iqr", "Established pattern (narrow)",
-         "Mostly one price point, with enough variation elsewhere to still judge it.", ""),
-    Term("constant", "Single fixed price",
-         "Every sale is the same amount, so there is no spread to measure. Handled by "
+    Term("mad", "Established",
+         "Enough varied transaction history to describe what is normal for this merchant.", ""),
+    Term("scaled_iqr", "Established (narrow spread)",
+         "Mostly one transaction amount, with enough variation elsewhere to still judge it.", ""),
+    Term("constant", "Single fixed amount",
+         "Every transaction is the same amount, so there is no spread to measure. Handled by "
          "rules rather than by comparison.", ""),
     Term("insufficient_data", "Not enough history",
-         "Too few sales, or over too short a period, to say what normal looks like yet.", ""),
+         "Too few transactions, or over too short a period, to establish what is normal.", ""),
 )
 
 
