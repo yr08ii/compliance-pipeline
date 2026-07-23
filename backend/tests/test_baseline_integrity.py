@@ -6,10 +6,15 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from compliance.detection.baselines import DispersionMethod, fit_peer_baseline
+from compliance.detection.baselines import (
+    DispersionMethod,
+    fit_peer_baseline,
+    score_value,
+)
 from compliance.detection.windows import (
     fit_all_baselines,
     fit_peer_baselines,
+    fit_peer_transaction_baselines,
     fit_trend,
     quarantined_days,
 )
@@ -241,3 +246,52 @@ class TestPeerBaseline:
 
         assert peers["5411"].usable
         assert peers["5411"].upper_fence() < 50_000.0
+
+
+class TestPeerTransactionBaseline:
+    """Transaction-level peer test: is this merchant's TRANSACTION unusual for
+    its cohort? The merchant-median test cannot answer this — a median does
+    not move for one large ticket, which is exactly the point of a median."""
+
+    def _cohort(self, session):
+        session.add_all([Merchant(merchant_id=f"C{i}", mcc="5814") for i in range(5)])
+        for i in range(5):
+            for day in range(1, 25):
+                _txn(session, f"C{i}", 40.0 + i * 5, day)
+                _txn(session, f"C{i}", 60.0 + i * 5, day)
+
+    def test_catches_a_single_outrageous_ticket(self, session):
+        self._cohort(session)
+        session.add(Merchant(merchant_id="ODD", mcc="5814"))
+        for day in range(1, 25):
+            _txn(session, "ODD", 50.0, day)
+        _txn(session, "ODD", 50_000.0, 1)
+        session.flush()
+
+        cohort = fit_peer_transaction_baselines(session, AS_OF, WINDOW)["5814"]
+
+        assert cohort.usable
+        assert score_value(50_000.0, cohort).is_outlier is True
+
+    def test_a_normal_ticket_for_the_cohort_is_not_flagged(self, session):
+        self._cohort(session)
+        session.flush()
+
+        cohort = fit_peer_transaction_baselines(session, AS_OF, WINDOW)["5814"]
+
+        assert score_value(55.0, cohort).is_outlier is False
+
+    def test_one_high_volume_merchant_cannot_dominate_the_cohort(self, session):
+        """Per-merchant capping: pooling raw transactions would let a member
+        with far more volume drag the cohort distribution to cover itself."""
+        self._cohort(session)
+        session.add(Merchant(merchant_id="LOUD", mcc="5814"))
+        for day in range(1, 25):
+            for _ in range(40):
+                _txn(session, "LOUD", 9_000.0, day)
+        session.flush()
+
+        cohort = fit_peer_transaction_baselines(session, AS_OF, WINDOW)["5814"]
+
+        assert cohort.center < 500.0, "a single loud merchant captured the cohort"
+        assert score_value(9_000.0, cohort).is_outlier is True

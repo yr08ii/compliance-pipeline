@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import (
+    MIN_COHORT_MERCHANTS,
     Baseline,
     PeerBaseline,
     Trend,
@@ -189,6 +190,71 @@ def fit_peer_baselines(
     for mcc, members in per_merchant.items():
         centers = [_median(values) for values in members.values() if values]
         cohorts[mcc] = fit_peer_baseline(centers, n_merchants=len(centers))
+    return cohorts
+
+
+def _capped(values: list[float], cap: int) -> list[float]:
+    """Evenly sample down to `cap` items, deterministically.
+
+    Evenly spaced rather than head-or-tail so the sample represents the whole
+    window instead of one end of it.
+    """
+    if len(values) <= cap:
+        return values
+    step = len(values) / cap
+    return [values[int(i * step)] for i in range(cap)]
+
+
+def fit_peer_transaction_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    lag_days: int = 0,
+    per_merchant_cap: int = 200,
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit a cohort's *transaction* distribution per MCC.
+
+    Answers "is this ticket unusual for this trade?" — distinct from the
+    merchant-level cohort test, which asks whether the merchant's typical
+    ticket is unusual. The distinction matters most for cold-start merchants:
+    a median does not move for a single huge transaction, so only a
+    transaction-level test can catch one large ticket at a merchant that has
+    no baseline of its own.
+
+    Each member's contribution is capped so a high-volume merchant cannot pull
+    the cohort distribution far enough to cover its own behaviour.
+    """
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(Merchant.mcc, Transaction.merchant_id, Transaction.total_amount,
+               Transaction.occurred_at)
+        .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
+        .where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+        .order_by(Merchant.mcc, Transaction.merchant_id, Transaction.occurred_at)
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    by_member: dict[str, dict[str, list[float]]] = {}
+    for mcc, merchant_id, amount, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        by_member.setdefault(mcc, {}).setdefault(merchant_id, []).append(amount)
+
+    cohorts: dict[str, Baseline] = {}
+    for mcc, members in by_member.items():
+        pooled: list[float] = []
+        for values in members.values():
+            pooled.extend(_capped(values, per_merchant_cap))
+        # A cohort needs several merchants before its spread means anything.
+        required = 1 if len(members) >= MIN_COHORT_MERCHANTS else len(pooled) + 1
+        cohorts[mcc] = fit_baseline(pooled, min_observations=required)
     return cohorts
 
 

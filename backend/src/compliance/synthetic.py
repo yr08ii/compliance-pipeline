@@ -57,7 +57,11 @@ SPECS = (
     MerchantSpec("JEWEL2", "5944", "Tsim Sha Tsui", 2600.0, 350.0, 4, 90),
     MerchantSpec("JEWEL3", "5944", "Mong Kok", 3400.0, 450.0, 4, 90),
     MerchantSpec(FIXED, "5814", "Sham Shui Po", 38.0, 0.0, 8, 90),
-    MerchantSpec(NEWBIE, "5732", "Tsim Sha Tsui", 800.0, 150.0, 3, 4),
+    # A cold-start grocer whose tickets are ordinary, plus one outrageous
+    # ticket on the scored day. It has no baseline of its own, and its
+    # median is unmoved by one large sale, so ONLY the transaction-level
+    # peer test can catch it.
+    MerchantSpec(NEWBIE, "5411", "Tsim Sha Tsui", 110.0, 20.0, 3, 4),
     # 4% a day compounds to ~10x over 60 days, yet no single day is an
     # outlier against its own trailing window.
     MerchantSpec(RAMP, "5814", "Central", 60.0, 12.0, 5, 90, daily_growth=0.04),
@@ -108,6 +112,8 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                 # Inject the anomaly on the scored day only.
                 if spec.merchant_id == SPIKE and day == 0 and n == 0:
                     amount = round(spec.typical_ticket * SPIKE_MULTIPLE, 2)
+                if spec.merchant_id == NEWBIE and day == 0 and n == 0:
+                    amount = 48_000.0
 
                 session.add(
                     Transaction(

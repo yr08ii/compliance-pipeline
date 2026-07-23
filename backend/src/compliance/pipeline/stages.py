@@ -17,6 +17,7 @@ from compliance.detection.windows import (
     _window_bounds,
     fit_all_baselines,
     fit_peer_baselines,
+    fit_peer_transaction_baselines,
     fit_trend,
     quarantined_days,
 )
@@ -39,7 +40,8 @@ TREND_SHORT_DAYS = 7
 TREND_LONG_DAYS = 90
 
 AMOUNT_DETECTOR = "amount_vs_own_baseline"
-PEER_DETECTOR = "amount_vs_mcc_peers"
+PEER_TXN_DETECTOR = "ticket_vs_mcc_peers"
+PEER_MERCHANT_DETECTOR = "merchant_level_vs_mcc_peers"
 TREND_DETECTOR = "level_shift_ramp"
 
 
@@ -65,12 +67,16 @@ def profile(session: Session, *, as_of: datetime) -> None:
         lag_days=LAG_DAYS,
     )
     peers = fit_peer_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
+    peer_txns = fit_peer_transaction_baselines(
+        session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
+    )
     quarantined = quarantined_days(session)
     window_start, window_end = _window_bounds(as_of, WINDOW_DAYS, LAG_DAYS)
 
     for merchant_id, baseline in baselines.items():
         merchant = session.get(Merchant, merchant_id)
         peer = peers.get(merchant.mcc) if merchant else None
+        peer_txn = peer_txns.get(merchant.mcc) if merchant else None
         trend = fit_trend(
             session,
             merchant_id,
@@ -106,6 +112,9 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "peer_fence": peer.upper_fence() if peer and peer.usable else None,
                     "peer_merchants": peer.n_merchants if peer else 0,
                     "peer_usable": bool(peer and peer.usable),
+                    "peer_txn_center": peer_txn.center if peer_txn else None,
+                    "peer_txn_dispersion": peer_txn.dispersion if peer_txn else None,
+                    "peer_txn_usable": bool(peer_txn and peer_txn.usable),
                     "trend_ratio": round(trend.ratio, 3),
                     "trend_is_ramp": trend.is_ramp,
                 },
@@ -166,10 +175,38 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # to that merchant's own baseline being contaminated.
         day_amounts = _scored_day_amounts(session, p.merchant_id, as_of)
 
-        # Peer test: is this MERCHANT unusual for its cohort? Its own typical
-        # ticket against the cohort's distribution of typical tickets — like
-        # against like. Comparing a single transaction to a distribution of
-        # medians would mix units and mean nothing.
+        # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
+        # This is the one that covers cold start: a median does not move for a
+        # single huge ticket, so neither the merchant's own baseline (which it
+        # may not have) nor the merchant-level cohort test can see it.
+        if p.metrics.get("peer_txn_usable") and day_amounts:
+            cohort_txn = Baseline(
+                center=p.metrics["peer_txn_center"],
+                dispersion=p.metrics["peer_txn_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["peer_merchants"],
+            )
+            worst = max(
+                (score_value(a, cohort_txn) for a in day_amounts),
+                key=lambda s: s.deviation,
+            )
+            if worst.is_outlier:
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_TXN_DETECTOR,
+                    "sub_score": min(worst.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "ticket_vs_mcc_peers",
+                        "merchant_value": worst.value,
+                        "baseline_value": cohort_txn.center,
+                        "deviation": round(worst.deviation, 2),
+                    },
+                })
+
+        # Peer test 2 — is this MERCHANT unusual for its cohort? Catches the
+        # systematic case test 1 cannot: every ticket sits inside the cohort's
+        # range, but the merchant's whole level is shifted.
         if p.metrics.get("peer_usable") and p.metrics.get("baseline_center"):
             cohort = Baseline(
                 center=p.metrics["peer_center"],
@@ -182,7 +219,7 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
-                    "detector": PEER_DETECTOR,
+                    "detector": PEER_MERCHANT_DETECTOR,
                     "sub_score": min(peer_score.deviation / 10.0, 1.0),
                     "feature": {
                         "feature_name": "typical_ticket_vs_mcc_peers",
