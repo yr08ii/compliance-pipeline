@@ -14,16 +14,17 @@ from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import Baseline, DispersionMethod, score_value
 from compliance.detection.profiles import (
-    ActiveHours,
-    CohortHours,
     OriginMix,
-    fit_active_hours,
-    fit_cohort_hours,
-    hour_is_unusual_for_cohort,
     fit_origin_mix,
-    hour_is_unusual,
     origin_surprisal,
     SURPRISAL_FLAG,
+)
+from compliance.detection.timedensity import (
+    TimeDensity,
+    fit_cohort_time_density,
+    fit_time_density,
+    local_time_of_day,
+    time_is_unusual,
 )
 from compliance.detection.windows import (
     _window_bounds,
@@ -100,7 +101,7 @@ def profile(session: Session, *, as_of: datetime) -> None:
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
     peer_volumes = fit_peer_volume_baselines(session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS)
-    cohort_hours = fit_cohort_hours(session, as_of, WINDOW_DAYS, LAG_DAYS)
+    cohort_hours = fit_cohort_time_density(session, as_of, WINDOW_DAYS, LAG_DAYS)
     district_txns = fit_peer_transaction_baselines(
         session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS, dimension="subdistrict"
     )
@@ -132,7 +133,7 @@ def profile(session: Session, *, as_of: datetime) -> None:
             long_days=TREND_LONG_DAYS,
             lag_days=LAG_DAYS,
         )
-        hours = fit_active_hours(session, merchant_id, as_of, WINDOW_DAYS, LAG_DAYS)
+        hours = fit_time_density(session, merchant_id, as_of, WINDOW_DAYS, LAG_DAYS)
         origins = fit_origin_mix(session, merchant_id, as_of, WINDOW_DAYS, LAG_DAYS)
         excluded = sum(1 for m, _ in quarantined if m == merchant_id)
 
@@ -174,16 +175,28 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "peer_volume_dispersion": peer_volume.dispersion if peer_volume else None,
                     "peer_volume_usable": bool(peer_volume and peer_volume.usable),
                     "subdistrict": district,
-                    "cohort_hours_density": list(cohort_hour.density) if cohort_hour else None,
+                    "cohort_hours_density": (
+                        [round(v, 6) for v in cohort_hour.density] if cohort_hour else None
+                    ),
+                    "cohort_hours_threshold": (
+                        round(cohort_hour.threshold, 6) if cohort_hour else None
+                    ),
+                    "cohort_hours_n": cohort_hour.n if cohort_hour else 0,
                     "cohort_hours_usable": bool(cohort_hour and cohort_hour.usable),
-                    "cohort_hours_merchants": cohort_hour.n_merchants if cohort_hour else 0,
                     "district_txn_center": district_txn.center if district_txn else None,
                     "district_txn_dispersion": district_txn.dispersion if district_txn else None,
                     "district_txn_usable": bool(district_txn and district_txn.usable),
                     "foreign_center": foreign.center if foreign else None,
                     "foreign_dispersion": foreign.dispersion if foreign else None,
                     "foreign_usable": bool(foreign and foreign.usable),
-                    "hours_density": list(hours.density),
+                    # The estimated density is stored so an auditor can see the
+                    # pattern an alert was judged against. At full merchant
+                    # scale this should be handed between stages in memory
+                    # rather than round-tripped through the row.
+                    "hours_density": [round(v, 6) for v in hours.density],
+                    "hours_threshold": round(hours.threshold, 6),
+                    "hours_bandwidth": hours.bandwidth,
+                    "hours_n": hours.n,
                     "hours_usable": hours.usable,
                     "origin_counts": origins.counts,
                     "origin_n": origins.n,
@@ -243,9 +256,11 @@ def _scored_day_peak_rate(
     return float(_peak_rate(stamps, window_minutes))
 
 
-def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> list[int]:
+def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> list[float]:
+    """Times of day on the scored day, with minutes — the density resolves
+    below the hour, so rounding here would throw that away."""
     return [
-        s.hour for s in session.scalars(
+        local_time_of_day(s) for s in session.scalars(
             select(Transaction.occurred_at).where(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= as_of,
@@ -368,11 +383,14 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
 
         # When: trading at an hour this merchant never trades.
         if p.metrics.get("hours_usable"):
-            hours = ActiveHours(tuple(p.metrics["hours_density"]), p.metrics["baseline_n"])
+            hours = TimeDensity(
+                tuple(p.metrics["hours_density"]), p.metrics["hours_threshold"],
+                p.metrics["hours_bandwidth"], p.metrics["hours_n"],
+            )
             odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
-                   if hour_is_unusual(h, hours)]
+                   if time_is_unusual(h, hours)]
             if odd:
-                worst_hour = min(odd, key=lambda h: hours.share(h))
+                worst_hour = min(odd, key=hours.density_at)
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -380,9 +398,9 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     "sub_score": 0.5,
                     "feature": {
                         "feature_name": "transaction_hour",
-                        "merchant_value": float(worst_hour),
-                        "baseline_value": float(max(range(24), key=hours.share)),
-                        "deviation": round(hours.share(worst_hour) * 100, 2),
+                        "merchant_value": round(worst_hour, 2),
+                        "baseline_value": round(hours.peak_hour(), 2),
+                        "deviation": round(hours.density_at(worst_hour), 4),
                     },
                 })
 
@@ -411,12 +429,14 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # Cohort hours — the only thing that can call 3am odd for a merchant
         # with no hours pattern of its own.
         if p.metrics.get("cohort_hours_usable"):
-            ch = CohortHours(tuple(p.metrics["cohort_hours_density"]),
-                             p.metrics["cohort_hours_merchants"])
+            ch = TimeDensity(
+                tuple(p.metrics["cohort_hours_density"]),
+                p.metrics["cohort_hours_threshold"], 0.0, p.metrics["cohort_hours_n"],
+            )
             odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
-                   if hour_is_unusual_for_cohort(h, ch)]
+                   if time_is_unusual(h, ch)]
             if odd:
-                worst_hour = min(odd, key=lambda h: ch.share(h))
+                worst_hour = min(odd, key=ch.density_at)
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -424,9 +444,9 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     "sub_score": 0.5,
                     "feature": {
                         "feature_name": "hour_vs_trade_hours",
-                        "merchant_value": float(worst_hour),
-                        "baseline_value": float(max(range(24), key=ch.share)),
-                        "deviation": round(ch.share(worst_hour) * 100, 2),
+                        "merchant_value": round(worst_hour, 2),
+                        "baseline_value": round(ch.peak_hour(), 2),
+                        "deviation": round(ch.density_at(worst_hour), 4),
                     },
                 })
 

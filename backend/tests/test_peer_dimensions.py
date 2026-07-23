@@ -8,9 +8,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import score_value
-from compliance.detection.profiles import (
-    fit_cohort_hours,
-    hour_is_unusual_for_cohort,
+from compliance.detection.timedensity import (
+    fit_cohort_time_density,
+    time_is_unusual,
 )
 from compliance.detection.windows import (
     fit_peer_foreign_ratio_baselines,
@@ -49,11 +49,11 @@ class TestCohortHours:
                     _txn(session, f"B{i}", 200.0, day, hour)
         session.flush()
 
-        cohorts = fit_cohort_hours(session, AS_OF, WINDOW)
+        cohorts = fit_cohort_time_density(session, AS_OF, WINDOW)
 
         assert cohorts["5813"].usable
-        assert hour_is_unusual_for_cohort(1, cohorts["5813"]) is False
-        assert hour_is_unusual_for_cohort(11, cohorts["5813"]) is True
+        assert time_is_unusual(1.0, cohorts["5813"]) is False
+        assert time_is_unusual(11.0, cohorts["5813"]) is True
 
     def test_covers_a_merchant_with_no_hours_pattern_of_its_own(self, session):
         """A cold-start merchant has no own hour density. The cohort's is the
@@ -67,9 +67,9 @@ class TestCohortHours:
         _txn(session, "NEW", 100.0, 1, hour=3)
         session.flush()
 
-        cohorts = fit_cohort_hours(session, AS_OF, WINDOW)
+        cohorts = fit_cohort_time_density(session, AS_OF, WINDOW)
 
-        assert hour_is_unusual_for_cohort(3, cohorts["5411"]) is True
+        assert time_is_unusual(3.0, cohorts["5411"]) is True
 
     def test_each_member_counts_once(self, session):
         """A high-volume member must not define the cohort's hours."""
@@ -83,11 +83,11 @@ class TestCohortHours:
                 _txn(session, "LOUD", 100.0, day, hour=3)
         session.flush()
 
-        cohorts = fit_cohort_hours(session, AS_OF, WINDOW)
+        cohorts = fit_cohort_time_density(session, AS_OF, WINDOW)
 
         # Without equal weighting LOUD would be 98% of the pooled transactions
         # and 3am would look like this trade's core hour.
-        assert cohorts["5411"].share(10) > cohorts["5411"].share(3) * 3
+        assert cohorts["5411"].density_at(10) > cohorts["5411"].density_at(3) * 3
 
 
 class TestSubdistrictAmount:

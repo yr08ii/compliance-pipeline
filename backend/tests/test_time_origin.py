@@ -7,14 +7,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from compliance.detection.profiles import (
-    ActiveHours,
-    OriginMix,
-    fit_active_hours,
-    fit_origin_mix,
-    hour_is_unusual,
-    origin_surprisal,
-)
+from compliance.detection.profiles import fit_origin_mix, origin_surprisal
+from compliance.detection.timedensity import fit_time_density, time_is_unusual
 from compliance.models import Base, Merchant, Transaction
 
 AS_OF = datetime(2026, 7, 20, tzinfo=timezone.utc)
@@ -38,7 +32,7 @@ def _txn(session, merchant_id, hour, days_before=1, country="HK"):
     ))
 
 
-class TestActiveHours:
+class TestTradingHours:
     def test_learns_a_daytime_merchants_window(self, session):
         session.add(Merchant(merchant_id="DAY", mcc="5411"))
         for day in range(1, 20):
@@ -46,35 +40,33 @@ class TestActiveHours:
                 _txn(session, "DAY", hour, day)
         session.flush()
 
-        hours = fit_active_hours(session, "DAY", AS_OF, 30)
+        hours = fit_time_density(session, "DAY", AS_OF, 30)
 
         assert hours.usable
-        assert hour_is_unusual(3, hours) is True
-        assert hour_is_unusual(13, hours) is False
+        assert time_is_unusual(3.0, hours) is True
+        assert time_is_unusual(13.0, hours) is False
 
     def test_handles_a_bar_trading_across_midnight(self, session):
-        """Time is circular: 23:00 and 01:00 are two hours apart, not 22.
-        A linear model would treat this merchant as having two separate
-        clusters and call its quietest hour normal."""
+        """Time is circular: 23:00 and 01:00 are two hours apart, not 22."""
         session.add(Merchant(merchant_id="BAR", mcc="5813"))
         for day in range(1, 20):
             for hour in (21, 22, 23, 0, 1, 2):
                 _txn(session, "BAR", hour, day)
         session.flush()
 
-        hours = fit_active_hours(session, "BAR", AS_OF, 30)
+        hours = fit_time_density(session, "BAR", AS_OF, 30)
 
         assert hours.usable
-        assert hour_is_unusual(0, hours) is False, "midnight is this bar's core trade"
-        assert hour_is_unusual(23, hours) is False
-        assert hour_is_unusual(12, hours) is True, "noon is when it is shut"
+        assert time_is_unusual(0.0, hours) is False, "midnight is this bar's core trade"
+        assert time_is_unusual(23.0, hours) is False
+        assert time_is_unusual(12.0, hours) is True, "noon is when it is shut"
 
     def test_thin_history_is_unusable(self, session):
         session.add(Merchant(merchant_id="THIN", mcc="5411"))
         _txn(session, "THIN", 10)
         session.flush()
 
-        assert fit_active_hours(session, "THIN", AS_OF, 30).usable is False
+        assert fit_time_density(session, "THIN", AS_OF, 30).usable is False
 
 
 class TestOriginMix:

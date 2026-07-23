@@ -1,6 +1,6 @@
 """Local bootstrap: generate synthetic history and run the pipeline once."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete
 
@@ -24,8 +24,13 @@ def _reset_demo_data(session) -> None:
         session.execute(delete(model))
 
 
+# The scored day is the Hong Kong business day. Anchoring to UTC midnight
+# would cut the day at 08:00 local, splitting a merchant's trading in two.
+HKT = timezone(timedelta(hours=8))
+
+
 def main() -> None:
-    as_of = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    as_of = datetime.now(HKT).replace(hour=0, minute=0, second=0, microsecond=0)
     with SessionLocal() as session:
         _reset_demo_data(session)
         session.commit()

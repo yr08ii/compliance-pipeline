@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
 from compliance.models import Merchant, Transaction
+
+# Merchants keep Hong Kong hours, so history is generated in HKT. Building
+# it in UTC would make every '9am to 8pm' shop a night trader straddling
+# midnight once the detectors read local time.
+HKT = timezone(timedelta(hours=8))
 
 # Ground truth: what each generated merchant is meant to represent.
 STEADY = "STEADY"  # mature, well-behaved — must NOT be flagged
@@ -45,6 +50,10 @@ class MerchantSpec:
     txns_per_day: int
     history_days: int
     daily_growth: float = 0.0
+    # Operating window, independent of volume: a busier shop does not
+    # thereby stay open later.
+    open_hour: int = 9
+    close_hour: int = 20
 
 
 # Cohort members give each MCC enough merchants for a peer baseline; without
@@ -89,6 +98,13 @@ SPECS = (
 SPIKE_MULTIPLE = 25.0
 
 
+def _hour_in_window(spec: MerchantSpec, n: int, per_day: int) -> float:
+    """Spread the day's transactions across the merchant's operating window,
+    so the window is a property of the business rather than of its volume."""
+    span = (spec.close_hour - spec.open_hour) % 24 or 24
+    return (spec.open_hour + span * (n / max(per_day, 1))) % 24
+
+
 def _ticket(rng: random.Random, spec: MerchantSpec) -> float:
     if spec.spread == 0:
         return spec.typical_ticket
@@ -106,6 +122,12 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
     """
     rng = random.Random(seed)
     counter = 0
+    # Anchor to local midnight, so an hour in a spec is that hour in HK.
+    # Converting the instant alone is not enough: midnight UTC is 08:00 HKT,
+    # and every generated hour would stack on top of that offset.
+    as_of = (as_of.astimezone(HKT) if as_of.tzinfo else as_of.replace(tzinfo=HKT)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
     for spec in SPECS:
         session.add(
@@ -149,7 +171,7 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                             if spec.merchant_id == BURST and day == 0
                             else timedelta(hours=3)
                             if spec.merchant_id == NIGHT and day == 0
-                            else timedelta(hours=(9 + n) % 24)
+                            else timedelta(hours=_hour_in_window(spec, n, per_day))
                         ),
                         is_refund=False,
                         card_issuing_country=(
