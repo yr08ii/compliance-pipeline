@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { apiGet, type AlertOut } from "../api/client";
 import { useGlossary } from "../api/glossary";
+import { Card, ErrorNote, Loading, Pill } from "../lib/ui";
 
-function severityTone(deviation: number) {
-  if (deviation >= 5) return "bg-red-50 text-red-700 border-red-200";
-  if (deviation >= 3) return "bg-amber-50 text-amber-700 border-amber-200";
-  return "bg-emerald-50 text-emerald-700 border-emerald-200";
+function tone(deviation: number) {
+  if (deviation >= 5) return "danger" as const;
+  if (deviation >= 3) return "warning" as const;
+  return "success" as const;
 }
 
 export default function CaseReview() {
@@ -18,122 +19,109 @@ export default function CaseReview() {
   useEffect(() => {
     if (id) {
       setError(false);
-      apiGet<AlertOut>(`/api/alerts/${id}`)
-        .then(setAlert)
-        .catch(() => setError(true));
+      apiGet<AlertOut>(`/api/alerts/${id}`).then(setAlert).catch(() => setError(true));
     }
   }, [id]);
 
-  if (error) {
-    return (
-      <div className="soft-panel rounded-[24px] p-6 text-sm text-red-700">
-        Could not load this case. Open the queue and select a valid alert.
-      </div>
-    );
-  }
-  if (!alert) {
-    return <div className="soft-panel rounded-[24px] p-6 text-sm text-slate-500">Loading case…</div>;
-  }
+  if (error) return <ErrorNote>Could not load this case. Open the queue and pick a valid alert.</ErrorNote>;
+  if (!alert) return <Loading />;
 
-  const primaryFeature = [...alert.feature_snapshot].sort((a, b) => b.deviation - a.deviation)[0];
+  const primary = [...alert.feature_snapshot].sort((a, b) => b.deviation - a.deviation)[0];
 
   return (
     <div className="space-y-6">
-      <section className="soft-panel rounded-[28px] p-6 lg:p-7">
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+      <Card>
+        <div className="flex flex-col gap-5 p-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Case review</p>
-            <h2 className="mt-2 text-3xl text-slate-950">{alert.merchant_id}</h2>
-            <p className="mt-2 text-sm text-slate-600">
-              {g.lane(alert.lane)} · rank {alert.rank} · score {alert.blended_score.toFixed(2)}
+            <p className="text-[0.72rem] uppercase tracking-[0.16em] text-[var(--muted)]">
+              Case review
+            </p>
+            <h2 className="mt-1 text-[1.7rem]">{alert.merchant_id}</h2>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[0.9rem] text-[var(--muted)]">
+              <Pill tone={alert.lane === "A" ? "blue" : "warning"}>{g.lane(alert.lane)}</Pill>
+              <span>rank {alert.rank}</span>
+              <span aria-hidden>·</span>
+              <span>
+                score{" "}
+                <span className="metric-number font-semibold text-[var(--text-strong)]">
+                  {alert.blended_score.toFixed(2)}
+                </span>
+              </span>
+            </div>
+          </div>
+          <div className="rounded-[var(--radius)] bg-[var(--blue-50)] px-5 py-4">
+            <p className="text-[0.75rem] uppercase tracking-[0.14em] text-[var(--blue-600)]">
+              Primary reason
+            </p>
+            <p className="mt-1 text-[1.02rem] font-semibold text-[var(--navy-800)]">
+              {g.detector(alert.triggering_detectors[0]?.detector ?? "")}
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Merchant</div>
-              <div className="mt-2 text-lg font-semibold text-slate-950">{alert.merchant_id}</div>
-            </div>
-            <div className="rounded-2xl bg-violet-50 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-violet-700/80">Group</div>
-              <div className="mt-2 text-lg font-semibold text-violet-700">{g.lane(alert.lane)}</div>
-            </div>
-            <div className="rounded-2xl bg-emerald-50 p-4">
-              <div className="text-xs uppercase tracking-[0.2em] text-emerald-700/80">Score</div>
-              <div className="mt-2 text-lg font-semibold text-emerald-700">{alert.blended_score.toFixed(2)}</div>
-            </div>
-          </div>
         </div>
-      </section>
+      </Card>
 
-      <section className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
-        <div className="soft-panel overflow-hidden rounded-[28px]">
-          <div className="border-b border-slate-200/80 px-6 py-5">
-            <h3 className="text-xl text-slate-950">What diverged from baseline</h3>
-            <p className="mt-1 text-sm text-slate-500">The exact features behind the flag, preserved as of alert time.</p>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50/80 text-left text-xs uppercase tracking-[0.18em] text-slate-500">
+      <div className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
+        <Card title="What was unusual" subtitle="The exact measures behind the flag, as of the run">
+          <table className="w-full text-[0.9rem]">
+            <thead className="border-b border-[var(--border)] text-left text-[0.72rem] uppercase tracking-[0.12em] text-[var(--muted)]">
               <tr>
-                <th className="px-6 py-4 font-medium">Measure</th>
-                <th className="px-6 py-4 font-medium">Merchant</th>
-                <th className="px-6 py-4 font-medium">Baseline</th>
-                <th className="px-6 py-4 font-medium">Deviation</th>
+                <th className="px-5 py-3 font-semibold">Measure</th>
+                <th className="px-5 py-3 text-right font-semibold">This merchant</th>
+                <th className="px-5 py-3 text-right font-semibold">Baseline</th>
+                <th className="px-5 py-3 text-right font-semibold">Deviation</th>
               </tr>
             </thead>
             <tbody>
               {alert.feature_snapshot.map((f, i) => (
-                <tr key={i} className="border-t border-slate-100 transition hover:bg-slate-50/80">
-                  <td className="px-6 py-4 font-medium text-slate-950">{g.feature(f.feature_name)}</td>
-                  <td className="px-6 py-4 tabular-nums">{f.merchant_value.toLocaleString()}</td>
-                  <td className="px-6 py-4 tabular-nums text-slate-600">{f.baseline_value.toLocaleString()}</td>
-                  <td className="px-6 py-4">
-                    <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${severityTone(f.deviation)}`}>
-                      {f.deviation.toFixed(2)}×
-                    </span>
+                <tr key={i} className="border-b border-[var(--border)] last:border-b-0">
+                  <td className="px-5 py-3.5 font-medium text-[var(--text-strong)]">
+                    {g.feature(f.feature_name)}
+                  </td>
+                  <td className="px-5 py-3.5 text-right metric-number">
+                    {f.merchant_value.toLocaleString()}
+                  </td>
+                  <td className="px-5 py-3.5 text-right metric-number text-[var(--muted)]">
+                    {f.baseline_value.toLocaleString()}
+                  </td>
+                  <td className="px-5 py-3.5 text-right">
+                    <Pill tone={tone(f.deviation)}>{f.deviation.toFixed(1)}σ</Pill>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        </Card>
 
-        <aside className="space-y-4">
-          <div className="soft-panel rounded-[24px] p-5">
-            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Analyst posture</p>
-            <p className="mt-3 text-lg font-medium text-slate-950">Disposition arrives next</p>
-            <p className="mt-2 text-sm text-slate-600">
-              The next plan adds verdict capture, reason codes, and signed case actions.
-            </p>
-          </div>
-          <div className="soft-panel rounded-[24px] p-5">
-            <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Signal summary</p>
-            <div className="mt-4 space-y-3 text-sm">
-              <div className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-                <span className="text-slate-600">Reason</span>
-                <span className="font-medium text-slate-950">
-                  {alert.triggering_detectors[0]
-                    ? g.detector(alert.triggering_detectors[0].detector)
-                    : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-                <span className="text-slate-600">Baseline</span>
-                <span className="metric-number font-medium text-slate-950">
-                  {primaryFeature ? primaryFeature.baseline_value.toLocaleString() : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-                <span className="text-slate-600">Observed value</span>
-                <span className="metric-number font-medium text-slate-950">
-                  {primaryFeature ? primaryFeature.merchant_value.toLocaleString() : "—"}
-                </span>
-              </div>
+        <div className="space-y-4">
+          <Card title="Summary">
+            <dl className="divide-y divide-[var(--border)]">
+              {[
+                ["Reason", g.detector(alert.triggering_detectors[0]?.detector ?? "")],
+                ["Compared against", primary ? g.feature(primary.feature_name) : "—"],
+                ["Baseline", primary ? primary.baseline_value.toLocaleString() : "—"],
+                ["Observed", primary ? primary.merchant_value.toLocaleString() : "—"],
+              ].map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between gap-4 px-5 py-3 text-[0.9rem]">
+                  <dt className="text-[var(--muted)]">{k}</dt>
+                  <dd className="metric-number font-medium text-[var(--text-strong)] text-right">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </Card>
+
+          <Card>
+            <div className="p-5">
+              <p className="text-[0.72rem] uppercase tracking-[0.14em] text-[var(--muted)]">
+                Analyst decision
+              </p>
+              <p className="mt-2 text-[0.92rem] leading-7 text-[var(--text)]">
+                Verdict capture, reason codes, and a signed decision arrive in the disposition
+                phase. Deviation is shown in standard deviations from the merchant's baseline.
+              </p>
             </div>
-          </div>
-        </aside>
-      </section>
-
-      <p className="text-sm text-slate-500">Disposition form and digital signature arrive in the Phase 2 plan.</p>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }

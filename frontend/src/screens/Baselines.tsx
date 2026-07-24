@@ -1,35 +1,27 @@
 import { useEffect, useState } from "react";
 import { apiGet, type BaselineOverview, type BaselineRow } from "../api/client";
 import { useGlossary } from "../api/glossary";
+import { Card, ErrorNote, Loading, Pill, StatTile } from "../lib/ui";
+import { IconBaselines, IconClock, IconMerchants, IconShield } from "../lib/icons";
 
-function shortDate(iso: string | null | undefined) {
+function short(iso: string | null | undefined) {
   return iso ? iso.slice(0, 10) : "—";
 }
 
-function Stat({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className="soft-panel rounded-2xl px-4 py-3">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">{label}</p>
-      <p className="metric-number mt-2 text-[1.5rem] font-semibold text-slate-950">{value}</p>
-      {note && <p className="mt-1 text-[0.9rem] text-slate-600">{note}</p>}
-    </div>
-  );
-}
-
 function Coverage({ row }: { row: BaselineRow }) {
-  const badges: [string, boolean][] = [
+  const on: [string, boolean][] = [
     ["Amount", row.usable],
     ["Volume", row.volume_usable],
     ["Speed", row.velocity_usable],
     ["Peers", row.peer_usable],
   ];
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {badges.map(([label, on]) => (
+    <div className="flex flex-wrap gap-1">
+      {on.map(([label, active]) => (
         <span
           key={label}
-          className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-            on ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-400"
+          className={`rounded px-1.5 py-0.5 text-[0.7rem] font-semibold ${
+            active ? "bg-[var(--success-bg)] text-[var(--success)]" : "bg-slate-100 text-slate-400"
           }`}
         >
           {label}
@@ -49,140 +41,92 @@ export default function Baselines() {
     apiGet<BaselineOverview>("/api/baselines").then(setData).catch(() => setError(true));
   }, []);
 
-  if (error) {
-    return (
-      <div className="soft-panel rounded-[24px] p-6 text-sm text-red-700">
-        Could not load baselines.
-      </div>
-    );
-  }
-  if (!data) {
-    return <div className="soft-panel rounded-[24px] p-6 text-sm text-slate-500">Loading…</div>;
-  }
+  if (error) return <ErrorNote>Could not load baselines.</ErrorNote>;
+  if (!data) return <Loading />;
 
   return (
     <div className="space-y-6">
-      <div>
-        <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Provenance</p>
-        <h2 className="mt-2 text-2xl text-slate-950">Baselines</h2>
-      </div>
-
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile
           label="Built from"
-          value={shortDate(data.window_start)}
-          note={`to ${shortDate(data.window_end)}`}
+          value={short(data.window_start)}
+          hint={`to ${short(data.window_end)}`}
+          icon={<IconBaselines className="h-5 w-5" />}
+          tone="navy"
         />
-        <Stat
+        <StatTile
           label="Enters next run"
-          value={shortDate(data.next_inclusion_date)}
-          note={`held ${data.lag_days} days for review`}
+          value={short(data.next_inclusion_date)}
+          hint={`held ${data.lag_days} days for review`}
+          icon={<IconClock className="h-5 w-5" />}
+          tone="blue"
         />
-        <Stat
+        <StatTile
           label="Scoreable"
           value={`${data.usable_count}/${data.total_count}`}
-          note="merchants with a usable baseline"
+          hint="have a usable baseline"
+          icon={<IconShield className="h-5 w-5" />}
+          tone="success"
         />
-        <Stat
+        <StatTile
           label="Days withheld"
-          value={String(data.quarantined_total)}
-          note="confirmed bad, excluded"
+          value={data.quarantined_total}
+          hint="confirmed bad, excluded"
+          icon={<IconMerchants className="h-5 w-5" />}
+          tone="warning"
         />
-      </section>
+      </div>
 
-      <section className="soft-panel rounded-[28px] p-5">
-        <p className="text-[0.95rem] leading-7 text-slate-700">
-          Baselines use a {data.window_days}-day window ending {shortDate(data.window_end)}. The{" "}
-          {data.lag_days}-day gap is the review period: {shortDate(data.next_inclusion_date)} joins
-          tonight, minus any day confirmed bad.
+      <Card>
+        <p className="px-5 py-4 text-[0.92rem] leading-7 text-[var(--text)]">
+          Baselines use a {data.window_days}-day window ending {short(data.window_end)}. The{" "}
+          {data.lag_days}-day gap is the review period: {short(data.next_inclusion_date)} joins on
+          the next run, minus any day confirmed bad.
         </p>
-      </section>
+      </Card>
 
-      <section className="soft-panel overflow-hidden rounded-[28px]">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b border-slate-200/80 bg-slate-50/80 text-xs uppercase tracking-[0.18em] text-slate-500">
+      <Card title="Per merchant" subtitle="What each merchant is judged against">
+        <table className="w-full text-left text-[0.9rem]">
+          <thead className="border-b border-[var(--border)] text-[0.72rem] uppercase tracking-[0.12em] text-[var(--muted)]">
             <tr>
-              <th className="px-5 py-4 font-medium">Merchant</th>
-              <th className="px-5 py-4 font-medium">Group</th>
-              <th className="px-5 py-4 font-medium">Baseline</th>
-              <th className="px-5 py-4 font-medium">Days</th>
-              <th className="px-5 py-4 font-medium">Detectors</th>
+              <th className="px-5 py-3 font-semibold">Merchant</th>
+              <th className="px-5 py-3 font-semibold">Group</th>
+              <th className="px-5 py-3 font-semibold">Baseline</th>
+              <th className="px-5 py-3 text-right font-semibold">Transactions</th>
+              <th className="px-5 py-3 font-semibold">Detectors</th>
             </tr>
           </thead>
           <tbody>
             {data.merchants.map((row) => (
-              <>
-                <tr
-                  key={row.merchant_id}
-                  onClick={() => setOpen(open === row.merchant_id ? null : row.merchant_id)}
-                  className="cursor-pointer border-b border-slate-100 transition last:border-b-0 hover:bg-slate-50/80"
-                >
-                  <td className="px-5 py-4">
-                    <div className="font-medium text-slate-950">{row.merchant_id}</div>
-                    <div className="mt-1 text-xs text-slate-500">MCC {row.mcc ?? "—"}</div>
-                  </td>
-                  <td className="px-5 py-4">
-                    <span
-                      className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${
-                        row.lane === "A"
-                          ? "border-violet-200 bg-violet-50 text-violet-700"
-                          : "border-amber-200 bg-amber-50 text-amber-700"
-                      }`}
-                    >
-                      {g.lane(row.lane)}
+              <tr
+                key={row.merchant_id}
+                onClick={() => setOpen(open === row.merchant_id ? null : row.merchant_id)}
+                className="cursor-pointer border-b border-[var(--border)] last:border-b-0 hoverable"
+              >
+                <td className="px-5 py-3.5">
+                  <p className="font-medium text-[var(--text-strong)]">{row.merchant_id}</p>
+                  <p className="mt-0.5 text-[0.78rem] text-[var(--muted)]">MCC {row.mcc ?? "—"}</p>
+                </td>
+                <td className="px-5 py-3.5">
+                  <Pill tone={row.lane === "A" ? "blue" : "warning"}>{g.lane(row.lane)}</Pill>
+                </td>
+                <td className="px-5 py-3.5 text-[var(--text)]">{g.method(row.method)}</td>
+                <td className="px-5 py-3.5 text-right metric-number">
+                  {row.observations}
+                  {row.quarantined_days > 0 && (
+                    <span className="ml-2 rounded bg-[var(--danger-bg)] px-1.5 py-0.5 text-[0.7rem] font-semibold text-[var(--danger)]">
+                      −{row.quarantined_days}
                     </span>
-                  </td>
-                  <td className="px-5 py-4 text-slate-700">
-                    {g.method(row.method)}
-                  </td>
-                  <td className="px-5 py-4 tabular-nums text-slate-700">
-                    {row.observations}
-                    {row.quarantined_days > 0 && (
-                      <span className="ml-2 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
-                        −{row.quarantined_days} withheld
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-5 py-4">
-                    <Coverage row={row} />
-                  </td>
-                </tr>
-                {open === row.merchant_id && (
-                  <tr key={`${row.merchant_id}-detail`} className="border-b border-slate-100 bg-slate-50/60">
-                    <td colSpan={5} className="px-5 py-4">
-                      <dl className="grid gap-3 text-[0.95rem] sm:grid-cols-3">
-                        <div>
-                          <dt className="text-slate-500">Typical ticket</dt>
-                          <dd className="metric-number font-medium text-slate-950">
-                            {row.center != null ? row.center.toLocaleString() : "—"}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="text-slate-500">Cohort size</dt>
-                          <dd className="metric-number font-medium text-slate-950">
-                            {row.peer_merchants} merchants
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="text-slate-500">Trend</dt>
-                          <dd className="font-medium text-slate-950">
-                            {row.is_ramp ? "Rising" : "Stable"}
-                          </dd>
-                        </div>
-                      </dl>
-                      {!row.usable && (
-                        <p className="mt-3 text-[0.9rem] text-slate-600">
-                          No self baseline — scored by cohort comparison only.
-                        </p>
-                      )}
-                    </td>
-                  </tr>
-                )}
-              </>
+                  )}
+                </td>
+                <td className="px-5 py-3.5">
+                  <Coverage row={row} />
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
-      </section>
+      </Card>
     </div>
   );
 }

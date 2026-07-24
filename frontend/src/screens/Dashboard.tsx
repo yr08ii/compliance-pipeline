@@ -1,85 +1,145 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiGet, type AlertOut } from "../api/client";
-
-function formatScore(value: number) {
-  return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+import { apiGet, type AlertOut, type BaselineOverview } from "../api/client";
+import { useGlossary } from "../api/glossary";
+import { Card, Donut, StatTile } from "../lib/ui";
+import { IconAlert, IconBaselines, IconMerchants, IconShield } from "../lib/icons";
 
 export default function Dashboard() {
+  const g = useGlossary();
   const [alerts, setAlerts] = useState<AlertOut[]>([]);
+  const [baselines, setBaselines] = useState<BaselineOverview | null>(null);
 
   useEffect(() => {
     apiGet<AlertOut[]>("/api/alerts").then(setAlerts).catch(() => setAlerts([]));
+    apiGet<BaselineOverview>("/api/baselines").then(setBaselines).catch(() => undefined);
   }, []);
 
-  const topAlert = alerts[0];
+  const flaggedMerchants = new Set(alerts.map((a) => a.merchant_id)).size;
+  const laneA = baselines?.merchants.filter((m) => m.lane === "A").length ?? 0;
+  const laneB = baselines?.merchants.filter((m) => m.lane === "B").length ?? 0;
+  const top = alerts[0];
 
   return (
     <div className="space-y-6">
-      <section className="grid gap-4 lg:grid-cols-[1.4fr_0.9fr]">
-        <div className="soft-panel rounded-[28px] p-6">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Tonight's run</p>
-          <h3 className="mt-3 text-[1.8rem] leading-tight text-balance text-slate-950">Review starts with one flagged merchant and a clean audit trail.</h3>
-          <p className="mt-3 max-w-2xl text-[0.98rem] leading-7 text-slate-700">
-            The nightly pipeline ran, one alert was ranked, and the case review panel is ready for analyst disposition.
-          </p>
-          <div className="mt-6 flex flex-wrap gap-3 text-[0.95rem]">
-            <Link
-              to="/queue"
-              className="focus-ring rounded-full bg-slate-950 px-4 py-2.5 font-medium text-white shadow-lg shadow-slate-950/15 transition hover:-translate-y-0.5"
-            >
-              Open alert queue
-            </Link>
-            <Link
-              to={topAlert ? `/case/${topAlert.id}` : "/queue"}
-              className="focus-ring rounded-full border border-slate-200 bg-white px-4 py-2.5 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
-            >
-              Review latest case
-            </Link>
-          </div>
-        </div>
-        <div className="soft-panel rounded-[28px] p-6">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Live queue</p>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <div className="rounded-2xl bg-slate-50 p-4">
-              <div className="metric-number text-[2.1rem] font-semibold text-slate-950">{alerts.length}</div>
-              <div className="mt-1 text-[0.95rem] text-slate-600">alerts waiting</div>
-            </div>
-            <div className="rounded-2xl bg-violet-50 p-4">
-              <div className="metric-number text-[2.1rem] font-semibold text-violet-700">{topAlert ? formatScore(topAlert.blended_score) : "0.00"}</div>
-              <div className="mt-1 text-[0.95rem] text-violet-700/80">top score</div>
-            </div>
-          </div>
-          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-white/80 p-4 text-[0.95rem] leading-7 text-slate-700">
-            {topAlert ? (
-              <>
-                <span className="font-medium text-slate-900">{topAlert.merchant_id}</span> is the current focus. Open the case to see the divergence panel.
-              </>
-            ) : (
-              "No alerts have been written yet. Run the bootstrap command to generate the review queue."
-            )}
-          </div>
-        </div>
-      </section>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile
+          label="Open alerts"
+          value={alerts.length}
+          hint="from last night's run"
+          icon={<IconAlert className="h-5 w-5" />}
+          tone="warning"
+        />
+        <StatTile
+          label="Merchants flagged"
+          value={flaggedMerchants}
+          hint={`of ${baselines?.total_count ?? "—"} monitored`}
+          icon={<IconMerchants className="h-5 w-5" />}
+          tone="blue"
+        />
+        <StatTile
+          label="Scoreable"
+          value={baselines ? `${baselines.usable_count}/${baselines.total_count}` : "—"}
+          hint="have a usable baseline"
+          icon={<IconShield className="h-5 w-5" />}
+          tone="success"
+        />
+        <StatTile
+          label="Days withheld"
+          value={baselines?.quarantined_total ?? 0}
+          hint="confirmed bad, excluded"
+          icon={<IconBaselines className="h-5 w-5" />}
+          tone="navy"
+        />
+      </div>
 
-      <section className="grid gap-4 md:grid-cols-3">
-        <article className="soft-panel rounded-[24px] p-5">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Pipeline state</p>
-          <p className="mt-3 text-[1.1rem] font-semibold text-slate-950">Healthy</p>
-          <p className="mt-2 text-[0.95rem] leading-7 text-slate-700">The local bootstrap command migrated, seeded, and ran the flow successfully.</p>
-        </article>
-        <article className="soft-panel rounded-[24px] p-5">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Human review</p>
-          <p className="mt-3 text-[1.1rem] font-semibold text-slate-950">Ready</p>
-          <p className="mt-2 text-[0.95rem] leading-7 text-slate-700">The alert queue and case page are fully wired to backend data.</p>
-        </article>
-        <article className="soft-panel rounded-[24px] p-5">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Training loop</p>
-          <p className="mt-3 text-[1.1rem] font-semibold text-slate-950">Seeded</p>
-          <p className="mt-2 text-[0.95rem] leading-7 text-slate-700">Feature snapshots are written once and are ready for later label capture.</p>
-        </article>
-      </section>
+      <div className="grid gap-4 lg:grid-cols-[1.3fr_1fr]">
+        <Card title="Tonight's run" subtitle="What the pipeline produced">
+          <div className="p-5">
+            <p className="text-[0.98rem] leading-7 text-[var(--text)]">
+              The nightly pipeline flagged{" "}
+              <span className="font-semibold text-[var(--text-strong)]">{flaggedMerchants}</span>{" "}
+              merchant{flaggedMerchants === 1 ? "" : "s"} across{" "}
+              <span className="font-semibold text-[var(--text-strong)]">{alerts.length}</span>{" "}
+              alert{alerts.length === 1 ? "" : "s"}.
+              {top && (
+                <>
+                  {" "}
+                  The top concern is{" "}
+                  <span className="font-semibold text-[var(--text-strong)]">{top.merchant_id}</span> —{" "}
+                  {g.detector(top.triggering_detectors[0]?.detector ?? "")}.
+                </>
+              )}
+            </p>
+            <div className="mt-5 flex flex-wrap gap-2.5">
+              <Link
+                to="/queue"
+                className="focus-ring rounded-[var(--radius)] bg-[var(--navy-800)] px-4 py-2.5 text-[0.9rem] font-medium text-white transition hover:bg-[var(--navy-700)]"
+              >
+                Open alert queue
+              </Link>
+              <Link
+                to={top ? `/case/${top.id}` : "/queue"}
+                className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-4 py-2.5 text-[0.9rem] font-medium text-[var(--text-strong)] transition hover:bg-[var(--blue-50)]"
+              >
+                Review top case
+              </Link>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Merchants by group" subtitle="How the portfolio is being judged">
+          <div className="p-5">
+            <Donut
+              caption="Merchants by group"
+              total={laneA + laneB}
+              segments={[
+                { label: "Established history", value: laneA, color: "var(--blue-500)" },
+                { label: "Limited history", value: laneB, color: "var(--warning)" },
+              ]}
+            />
+          </div>
+        </Card>
+      </div>
+
+      <Card
+        title="Top alerts"
+        subtitle="Highest risk from tonight"
+        action={
+          <Link
+            to="/queue"
+            className="focus-ring rounded-full border border-[var(--border-strong)] px-3 py-1.5 text-[0.82rem] font-medium text-[var(--text-strong)] hover:bg-[var(--blue-50)]"
+          >
+            View all
+          </Link>
+        }
+      >
+        <ul className="divide-y divide-[var(--border)]">
+          {alerts.slice(0, 5).map((a) => (
+            <li key={a.id}>
+              <Link
+                to={`/case/${a.id}`}
+                className="hoverable flex items-center justify-between gap-4 px-5 py-3.5"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-[var(--text-strong)]">{a.merchant_id}</p>
+                  <p className="mt-0.5 text-[0.85rem] text-[var(--muted)]">
+                    {g.detector(a.triggering_detectors[0]?.detector ?? "")}
+                  </p>
+                </div>
+                <span className="metric-number text-[0.9rem] font-semibold text-[var(--text-strong)]">
+                  {a.blended_score.toFixed(2)}
+                </span>
+              </Link>
+            </li>
+          ))}
+          {alerts.length === 0 && (
+            <li className="px-5 py-8 text-center text-[0.92rem] text-[var(--muted)]">
+              No alerts waiting.
+            </li>
+          )}
+        </ul>
+      </Card>
     </div>
   );
 }
