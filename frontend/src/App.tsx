@@ -1,113 +1,129 @@
-import { useEffect, useState } from "react";
-import { BrowserRouter, Routes, Route, NavLink } from "react-router-dom";
-import Dashboard from "./screens/Dashboard";
+import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import AlertQueue from "./screens/AlertQueue";
+import Baselines from "./screens/Baselines";
 import CaseReview from "./screens/CaseReview";
+import Dashboard from "./screens/Dashboard";
 import FollowThrough from "./screens/FollowThrough";
 import ModelInfo from "./screens/ModelInfo";
-import Baselines from "./screens/Baselines";
-import { apiGet, type AlertOut } from "./api/client";
+import {
+  IconBaselines,
+  IconCases,
+  IconDashboard,
+  IconModel,
+  IconQueue,
+} from "./lib/icons";
 import { cn } from "./lib/utils";
 
-const nav = [
-  { to: "/", label: "Dashboard", end: true },
-  { to: "/queue", label: "Alert queue" },
-  { to: "/cases", label: "Case follow-through" },
-  { to: "/baselines", label: "Baselines" },
-  { to: "/model", label: "Model info" },
+const NAV = [
+  { to: "/", label: "Dashboard", Icon: IconDashboard, end: true },
+  { to: "/queue", label: "Alert queue", Icon: IconQueue },
+  { to: "/cases", label: "Case follow-through", Icon: IconCases },
+  { to: "/baselines", label: "Baselines", Icon: IconBaselines },
+  { to: "/model", label: "Model info", Icon: IconModel },
 ];
 
-export default function App() {
-  const [alertCount, setAlertCount] = useState<number | null>(null);
+/** Title and subtitle come from the route, so the header states where you are
+ *  rather than repeating one slogan on every screen. */
+const PAGE: Record<string, { title: string; subtitle: string }> = {
+  "/": { title: "Overview", subtitle: "Last night's run and what needs attention today" },
+  "/queue": { title: "Alert queue", subtitle: "Merchants to review, highest risk first" },
+  "/cases": { title: "Case follow-through", subtitle: "Confirmed cases tracked to resolution" },
+  "/baselines": { title: "Baselines", subtitle: "What each merchant is currently judged against" },
+  "/model": { title: "Model info", subtitle: "How alerts are raised, and what each reason means" },
+};
 
-  useEffect(() => {
-    apiGet<AlertOut[]>("/api/alerts")
-      .then((a) => setAlertCount(a.length))
-      .catch(() => setAlertCount(null));
-  }, []);
+function Header() {
+  const { pathname } = useLocation();
+  const page =
+    PAGE[pathname] ??
+    (pathname.startsWith("/case/")
+      ? { title: "Case review", subtitle: "Everything behind this alert" }
+      : { title: "Compliance monitoring", subtitle: "" });
 
   return (
+    <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[var(--border)] pb-5">
+      <div>
+        <h1 className="text-[1.6rem]">{page.title}</h1>
+        {page.subtitle && (
+          <p className="mt-1 text-[0.95rem] text-[var(--muted)]">{page.subtitle}</p>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-[0.8rem] text-[var(--muted)]">
+        <span className="inline-flex h-2 w-2 rounded-full bg-[var(--success)]" aria-hidden />
+        Pipeline ready · runs 00:00
+      </div>
+    </header>
+  );
+}
+
+export default function App() {
+  return (
     <BrowserRouter>
-      <div className="min-h-screen text-slate-900">
+      <div className="flex min-h-screen">
         <a
-          href="#main-content"
-          className="focus-ring sr-only absolute left-4 top-4 z-50 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-900 shadow-lg focus:not-sr-only"
+          href="#main"
+          className="focus-ring sr-only absolute left-4 top-4 z-50 rounded-lg bg-white px-4 py-2 text-sm font-medium shadow-lg focus:not-sr-only"
         >
           Skip to content
         </a>
-        <div className="mx-auto flex min-h-screen w-full max-w-[1600px] gap-6 p-4 lg:p-6">
-          <aside className="glass-panel sticky top-6 flex h-[calc(100vh-3rem)] w-72 flex-col rounded-[28px] p-4 lg:p-5">
-            <div className="mb-6 rounded-[22px] border border-slate-200/80 bg-white/95 p-4 shadow-sm">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Local command center</p>
-              <h1 className="mt-3 text-[2.15rem] leading-tight text-balance">Compliance monitoring</h1>
-              <p className="mt-3 text-[0.95rem] leading-7 text-slate-700">
-                Closed-loop alerting, human review, and training feedback in one local workspace.
-              </p>
-            </div>
-            <nav className="flex flex-col gap-2" aria-label="Primary">
-              {nav.map((n) => (
-                <NavLink
-                  key={n.to}
-                  to={n.to}
-                  end={n.end}
-                  className={({ isActive }) =>
-                    cn(
-                      "nav-chip rounded-2xl border px-4 py-3 text-[0.95rem] font-semibold tracking-[-0.01em]",
-                      isActive
-                        ? "border-slate-950 bg-slate-950 text-white shadow-lg shadow-slate-950/20"
-                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"
-                    )
-                  }
-                >
-                  {n.label}
-                </NavLink>
-              ))}
-            </nav>
-            <div className="mt-auto rounded-[22px] border border-slate-200/80 bg-white/95 p-4 text-[0.95rem] text-slate-700">
-              <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">Status</p>
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <span>Pipeline</span>
-                <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-                  Ready
-                </span>
-              </div>
-              <div className="mt-2 flex items-center justify-between gap-3">
-                <span>Serving UI</span>
-                <span className="rounded-full bg-violet-50 px-2.5 py-1 text-[11px] font-semibold text-violet-700">
-                  FastAPI
-                </span>
-              </div>
-            </div>
-          </aside>
-          <main id="main-content" className="flex-1 min-w-0 rounded-[32px] glass-panel p-5 shadow-2xl lg:p-8">
-            <div className="mb-8 flex flex-col gap-4 border-b border-slate-200/70 pb-6 lg:flex-row lg:items-end lg:justify-between">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">Operations view</p>
-                <h2 className="mt-2 text-[2.15rem] leading-tight text-balance text-slate-950">Queue, review, and model insight in one place.</h2>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-[0.9rem] text-slate-600 sm:text-[0.95rem]">
-                <div className="soft-panel rounded-2xl px-4 py-3 text-center">
-                  <div className="metric-number text-[1.55rem] font-semibold text-slate-950">
-                    {alertCount ?? "—"}
-                  </div>
-                  <div>open alerts</div>
-                </div>
-                <div className="soft-panel rounded-2xl px-4 py-3 text-center">
-                  <div className="metric-number text-[1.55rem] font-semibold text-slate-950">Local</div>
-                  <div>self-contained</div>
-                </div>
-              </div>
-            </div>
+
+        <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col bg-[var(--navy-900)] px-3 py-5">
+          <div className="px-3 pb-6">
+            <p className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-[var(--blue-500)]">
+              Compliance
+            </p>
+            <p className="mt-1 text-[1.05rem] font-semibold text-white">Monitoring</p>
+          </div>
+
+          <nav className="flex flex-col gap-1" aria-label="Primary">
+            {NAV.map(({ to, label, Icon, end }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={end}
+                className={({ isActive }) =>
+                  cn(
+                    "focus-ring flex items-center gap-3 rounded-[var(--radius)] px-3 py-2.5 text-[0.92rem] transition-colors duration-150",
+                    isActive
+                      ? "bg-[var(--navy-700)] font-semibold text-white"
+                      : "text-slate-300 hover:bg-[var(--navy-800)] hover:text-white"
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <Icon
+                      className={cn("h-[18px] w-[18px]", isActive ? "text-[var(--blue-500)]" : "")}
+                    />
+                    {label}
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </nav>
+
+          <div className="mt-auto rounded-[var(--radius)] bg-[var(--navy-800)] px-3 py-3">
+            <p className="text-[0.72rem] font-semibold uppercase tracking-[0.18em] text-slate-400">
+              Environment
+            </p>
+            <p className="mt-1.5 text-[0.86rem] text-slate-200">Local · self-contained</p>
+            <p className="mt-0.5 text-[0.78rem] text-slate-400">No data leaves this machine</p>
+          </div>
+        </aside>
+
+        <main id="main" className="min-w-0 flex-1 px-6 py-6 lg:px-8">
+          <div className="mx-auto max-w-[1280px] space-y-6">
+            <Header />
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/queue" element={<AlertQueue />} />
               <Route path="/case/:id" element={<CaseReview />} />
               <Route path="/cases" element={<FollowThrough />} />
               <Route path="/baselines" element={<Baselines />} />
-            <Route path="/model" element={<ModelInfo />} />
+              <Route path="/model" element={<ModelInfo />} />
             </Routes>
-          </main>
-        </div>
+          </div>
+        </main>
       </div>
     </BrowserRouter>
   );

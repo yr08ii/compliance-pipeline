@@ -1,43 +1,57 @@
 @import "tailwindcss";
 
+/* Palette taken from The Payment Cards Group: deep navy, cool neutral ground,
+   a single blue accent. Status colours are the only other hues, so colour in
+   this interface always means something. */
 :root {
-  --text: #544d60;
-  --text-h: #11101a;
-  --bg: #f6f4ef;
-  --surface: rgba(255, 255, 255, 0.82);
-  --surface-strong: #ffffff;
-  --border: rgba(17, 16, 26, 0.08);
-  --border-strong: rgba(17, 16, 26, 0.14);
-  --code-bg: #f0ece3;
-  --accent: #6f3df4;
-  --accent-bg: rgba(111, 61, 244, 0.12);
-  --accent-border: rgba(111, 61, 244, 0.34);
-  --success: #0f9b6a;
-  --warning: #c47a1c;
-  --danger: #b03a3a;
-  --shadow:
-    0 28px 70px rgba(17, 16, 26, 0.08), 0 8px 24px rgba(17, 16, 26, 0.05);
+  --navy-900: #0f2b45;
+  --navy-800: #143654;
+  --navy-700: #1b4670;
+  --navy-600: #245a8d;
 
-  --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --heading: Georgia, "Times New Roman", serif;
-  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --blue-600: #2c6fa6;
+  --blue-500: #3e8acb;
+  --blue-100: #d7e7f4;
+  --blue-50: #eaf2f9;
 
-  font: 16px/1.55 var(--sans);
-  letter-spacing: 0.01em;
-  color-scheme: light;
+  --bg: #f4f7fa;
+  --surface: #ffffff;
+  --border: #e3e9f0;
+  --border-strong: #cfd8e3;
+
+  --text: #334155;
+  --text-strong: #0f2b45;
+  --muted: #64748b;
+
+  --success: #15803d;
+  --success-bg: #e8f5ec;
+  --warning: #b45309;
+  --warning-bg: #fdf3e3;
+  --danger: #b91c1c;
+  --danger-bg: #fdeceb;
+
+  /* Dense scale: this is an operations tool, not a marketing page. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --shadow-sm: 0 1px 2px rgba(15, 43, 69, 0.05);
+  --shadow: 0 1px 3px rgba(15, 43, 69, 0.08), 0 1px 2px rgba(15, 43, 69, 0.04);
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
   color: var(--text);
-  background:
-    radial-gradient(circle at top left, rgba(111, 61, 244, 0.12), transparent 28%),
-    radial-gradient(circle at top right, rgba(15, 155, 106, 0.08), transparent 24%),
-    linear-gradient(180deg, #faf8f3 0%, #f2efe9 100%);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  color-scheme: light;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 15px;
-  }
 }
 
 body {
@@ -46,30 +60,13 @@ body {
   background: var(--bg);
 }
 
-html {
-  color-scheme: light;
-}
-
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image: linear-gradient(rgba(17, 16, 26, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(17, 16, 26, 0.03) 1px, transparent 1px);
-  background-size: 28px 28px;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.7), transparent 90%);
-  opacity: 0.45;
-}
-
 @layer base {
   h1,
-  h2 {
-    font-family: var(--heading);
+  h2,
+  h3 {
+    color: var(--text-strong);
     font-weight: 600;
-    color: var(--text-h);
-    line-height: 1.1;
-    letter-spacing: -0.03em;
+    letter-spacing: -0.015em;
     margin: 0;
   }
 
@@ -81,59 +78,52 @@ body::before {
     color: inherit;
     text-decoration: none;
   }
-}
 
-table {
-  border-collapse: collapse;
+  /* Data columns must not jitter as values change. */
+  table {
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
-code {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
-}
-
-.glass-panel {
+.card {
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(18px);
-}
-
-.soft-panel {
-  background: var(--surface-strong);
-  border: 1px solid var(--border);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.7) inset;
-}
-
-.nav-chip {
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease,
-    transform 160ms ease;
-}
-
-.nav-chip:hover {
-  transform: translateX(1px);
-}
-
-.nav-chip:focus-visible,
-.focus-ring:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(111, 61, 244, 0.18), 0 0 0 1px rgba(111, 61, 244, 0.45);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
 }
 
 .metric-number {
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
 
-.text-balance {
-  text-wrap: balance;
+/* One elevation step for anything that lifts on hover, so the scale stays
+   consistent rather than every component inventing its own shadow. */
+.hoverable {
+  transition: box-shadow 160ms ease, border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.hoverable:hover {
+  box-shadow: var(--shadow);
+  border-color: var(--border-strong);
+}
+
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(62, 138, 203, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
