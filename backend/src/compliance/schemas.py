@@ -91,6 +91,7 @@ class Glossary(BaseModel):
     features: list[GlossaryTerm]
     lanes: list[GlossaryTerm]
     baseline_methods: list[GlossaryTerm]
+    alert_types: list[GlossaryTerm]
 
 
 class LedgerRow(BaseModel):
@@ -176,6 +177,16 @@ class PeerDistribution(BaseModel):
     peer_values: list[float]
 
 
+class BaselineWindow(BaseModel):
+    """Which data formed the baseline this alert was judged against."""
+
+    window_start: str | None
+    window_end: str | None
+    window_days: int | None
+    lag_days: int | None
+    quarantined_days: int | None
+
+
 class Diagnostics(BaseModel):
     alert_id: int
     merchant_id: str
@@ -185,4 +196,4 @@ class Diagnostics(BaseModel):
     statistics: Statistics
     hour_density: HourDensity
     peer_distribution: PeerDistribution
-    window: dict
+    window: BaselineWindow

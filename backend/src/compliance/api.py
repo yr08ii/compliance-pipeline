@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
             features=glossary.as_dicts(glossary.FEATURES),
             lanes=glossary.as_dicts(glossary.LANES),
             baseline_methods=glossary.as_dicts(glossary.BASELINE_METHODS),
+            alert_types=glossary.as_dicts(glossary.ALERT_TYPES),
         )
 
     @app.get("/api/baselines", response_model=BaselineOverview)
@@ -88,7 +89,9 @@ def create_app() -> FastAPI:
             merchants=rows,
         )
 
-    def _with_metadata(session: Session, alert: Alert) -> AlertOut:
+    def _with_metadata(
+        session: Session, alert: Alert, mcc_names: dict[str, str] | None = None
+    ) -> AlertOut:
         """Join the merchant identity an analyst needs to act on the alert.
 
         Joined at read time rather than copied into the alert row: a corrected
@@ -96,6 +99,10 @@ def create_app() -> FastAPI:
         frozen because that is what the detector actually judged.
         """
         merchant = session.get(Merchant, alert.merchant_id)
+        names = mcc_names if mcc_names is not None else diag.mcc_descriptions(session)
+        description = None
+        if merchant:
+            description = merchant.mcc_description or names.get(merchant.mcc)
         return AlertOut(
             id=alert.id,
             merchant_id=alert.merchant_id,
@@ -106,7 +113,7 @@ def create_app() -> FastAPI:
             triggering_detectors=alert.triggering_detectors,
             feature_snapshot=alert.feature_snapshot,
             mcc=merchant.mcc if merchant else None,
-            mcc_description=merchant.mcc_description if merchant else None,
+            mcc_description=description,
             merchant_district=merchant.merchant_district if merchant else None,
             merchant_subdistrict=merchant.merchant_subdistrict if merchant else None,
             business_nature=merchant.business_nature if merchant else None,
@@ -118,7 +125,9 @@ def create_app() -> FastAPI:
     @app.get("/api/alerts", response_model=list[AlertOut])
     def list_alerts(session: Session = Depends(get_session)) -> list[AlertOut]:
         alerts = session.scalars(select(Alert).order_by(Alert.rank))
-        return [_with_metadata(session, a) for a in alerts]
+        # Resolved once for the whole page rather than per row.
+        names = diag.mcc_descriptions(session)
+        return [_with_metadata(session, a, names) for a in alerts]
 
     @app.get("/api/alerts/{alert_id}", response_model=AlertOut)
     def get_alert(alert_id: int, session: Session = Depends(get_session)) -> AlertOut:

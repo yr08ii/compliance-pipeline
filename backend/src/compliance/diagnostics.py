@@ -259,3 +259,23 @@ def diagnostics(session: Session, alert: Alert) -> dict:
             "quarantined_days": metrics.get("quarantined_days"),
         },
     }
+
+
+def mcc_descriptions(session: Session) -> dict[str, str]:
+    """MCC code to description, resolved across the whole portfolio.
+
+    A description belongs to the code, not to the merchant, so a merchant row
+    missing one can borrow the description its peers carry. Without this a
+    synthetic or partially-loaded merchant shows a bare code, which is exactly
+    the ambiguity the labelling work set out to remove.
+    """
+    rows = session.execute(
+        select(Merchant.mcc, Merchant.mcc_description).where(
+            Merchant.mcc_description.is_not(None)
+        )
+    )
+    # First non-null wins; codes are stable so any member's wording will do.
+    resolved: dict[str, str] = {}
+    for mcc, description in rows:
+        resolved.setdefault(mcc, description)
+    return resolved

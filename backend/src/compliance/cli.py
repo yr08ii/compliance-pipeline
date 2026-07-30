@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 
 from compliance.db import SessionLocal
 from compliance.models import (
@@ -33,18 +33,26 @@ HKT = timezone(timedelta(hours=8))
 
 
 def main() -> None:
-    """CLI entry point: ``compliance-run [--as-of YYYY-MM-DD]``.
+    """CLI entry point: ``compliance-run [--as-of YYYY-MM-DD] [--force]``.
 
-    Generates synthetic history and runs the full pipeline.  ``--as-of``
-    sets the scored day (default: today in HKT).
+    DESTRUCTIVE. Clears every table, generates synthetic demo history, then
+    runs the pipeline. Intended for a fresh store or a demo reset.
+
+    To score data that is already loaded, use ``compliance-pipeline``, which
+    deletes nothing. This command refuses to run over a non-empty store unless
+    ``--force`` is given.
     """
     as_of_str: str | None = None
+    force = False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
         if args[i] == "--as-of" and i + 1 < len(args):
             as_of_str = args[i + 1]
             i += 2
+        elif args[i] == "--force":
+            force = True
+            i += 1
         else:
             print(f"Unknown argument: {args[i]}", file=sys.stderr)
             sys.exit(1)
@@ -57,6 +65,24 @@ def main() -> None:
         as_of = datetime.now(HKT).replace(hour=0, minute=0, second=0, microsecond=0)
 
     with SessionLocal() as session:
+        # This command WIPES every table before generating demo data. That is
+        # fine on an empty store and catastrophic on a loaded one, so it
+        # refuses to run over real data unless the caller says so explicitly.
+        existing = session.scalar(select(func.count()).select_from(Transaction)) or 0
+        if existing and not force:
+            merchants = session.scalar(select(func.count()).select_from(Merchant)) or 0
+            print(
+                f"refusing to run: the store holds {existing:,} transactions across "
+                f"{merchants:,} merchants.\n"
+                "\n"
+                "`compliance-run` deletes everything and regenerates synthetic demo "
+                "data. To score the data you already have, use:\n"
+                f"    compliance-pipeline --as-of {as_of.date()}\n"
+                "\n"
+                "If you really do want to discard it and reseed, pass --force."
+            )
+            sys.exit(1)
+
         _reset_demo_data(session)
         session.commit()
         generate_history(session, as_of=as_of)
@@ -64,6 +90,36 @@ def main() -> None:
         alert_count = run_pipeline_direct(session, as_of=as_of)
         session.commit()
         print(f"pipeline complete: {alert_count} alert(s) written")
+
+
+def pipeline_main() -> None:
+    """CLI entry point: ``compliance-pipeline [--as-of YYYY-MM-DD]``.
+
+    Scores the data already in the store. Unlike ``compliance-run`` this
+    destroys nothing — it is what a nightly run, a backfill, or a re-score
+    after fixing a threshold should call.
+    """
+    as_of_str: str | None = None
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg == "--as-of" and i + 1 < len(argv):
+            as_of_str = argv[i + 1]
+
+    if as_of_str:
+        as_of = datetime.strptime(as_of_str, "%Y-%m-%d").replace(
+            tzinfo=HKT, hour=0, minute=0, second=0, microsecond=0
+        )
+    else:
+        as_of = datetime.now(HKT).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    with SessionLocal() as session:
+        scored = as_of - timedelta(days=1)
+        alert_count = run_pipeline_direct(session, as_of=as_of)
+        session.commit()
+        print(
+            f"scored {scored.date()} (as-of {as_of.date()}): "
+            f"{alert_count} alert(s) written"
+        )
 
 
 def study_main() -> None:

@@ -15,6 +15,7 @@ export type Lookup = {
   detectorMeaning: (key: string) => string;
   feature: (key: string) => string;
   lane: (key: string) => string;
+  alertType: (key: string) => string;
   method: (key: string) => string;
   all: Glossary | null;
 };
@@ -38,6 +39,7 @@ export function useGlossary(): Lookup {
   const features = index(g?.features);
   const lanes = index(g?.lanes);
   const methods = index(g?.baseline_methods);
+  const alertTypes = index(g?.alert_types);
 
   return {
     // Falling back to the raw key keeps a new detector visible rather than
@@ -52,6 +54,7 @@ export function useGlossary(): Lookup {
       return origin ? `Cards issued in ${origin[1]}` : k;
     },
     lane: (k) => lanes.get(k)?.label ?? k,
+    alertType: (k) => alertTypes.get(k)?.label ?? k,
     method: (k) => methods.get(k)?.label ?? k,
     all: g,
   };

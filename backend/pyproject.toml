@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 compliance = "compliance.cli:main"
 compliance-run = "compliance.cli:main"
+compliance-pipeline = "compliance.cli:pipeline_main"
 compliance-study = "compliance.cli:study_main"
 compliance-upload = "compliance.cli:upload_main"
 compliance-backfill = "compliance.backfill:main"

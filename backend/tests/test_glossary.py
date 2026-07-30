@@ -64,6 +64,9 @@ def test_endpoint_returns_all_four_vocabularies():
     assert {t["key"] for t in body["detectors"]} == {t.key for t in glossary.DETECTORS}
     assert {t["key"] for t in body["lanes"]} == {"A", "B"}
     assert body["features"] and body["baseline_methods"]
+    assert {t["key"] for t in body["alert_types"]} == {
+        t.key for t in glossary.ALERT_TYPES
+    }
 
 
 def test_every_feature_name_emitted_by_a_detector_has_a_label():

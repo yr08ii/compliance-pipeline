@@ -102,11 +102,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/{alert_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Diagnostics
+         * @description Why this alert fired: every detector's verdict, the statistics
+         *     behind them, and the curves needed to plot the distributions.
+         */
+        get: operations["get_diagnostics_api_alerts__alert_id__diagnostics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/merchants/{merchant_id}/transactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Ledger
+         * @description Every transaction a merchant processed on one local day.
+         */
+        get: operations["get_ledger_api_merchants__merchant_id__transactions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** AlertOut */
+        /**
+         * AlertOut
+         * @description An alert with enough merchant context to build the review header.
+         *
+         *     The metadata is joined at read time rather than copied into the alert row:
+         *     a merchant's MCC description or district can be corrected later, and the
+         *     header should show what is true now. The `feature_snapshot` stays frozen,
+         *     because that is what the detector actually judged.
+         */
         AlertOut: {
             /** Id */
             id: number;
@@ -127,6 +176,22 @@ export interface components {
             triggering_detectors: components["schemas"]["DetectorHit"][];
             /** Feature Snapshot */
             feature_snapshot: components["schemas"]["FeatureDivergence"][];
+            /** Mcc */
+            mcc?: string | null;
+            /** Mcc Description */
+            mcc_description?: string | null;
+            /** Merchant District */
+            merchant_district?: string | null;
+            /** Merchant Subdistrict */
+            merchant_subdistrict?: string | null;
+            /** Business Nature */
+            business_nature?: string | null;
+            /** Merchant Status */
+            merchant_status?: string | null;
+            /** Scored Date */
+            scored_date?: string | null;
+            /** Alert Type */
+            alert_type?: string | null;
         };
         /**
          * BaselineOverview
@@ -184,12 +249,74 @@ export interface components {
             /** Is Ramp */
             is_ramp: boolean;
         };
+        /**
+         * BaselineWindow
+         * @description Which data formed the baseline this alert was judged against.
+         */
+        BaselineWindow: {
+            /** Window Start */
+            window_start: string | null;
+            /** Window End */
+            window_end: string | null;
+            /** Window Days */
+            window_days: number | null;
+            /** Lag Days */
+            lag_days: number | null;
+            /** Quarantined Days */
+            quarantined_days: number | null;
+        };
         /** DetectorHit */
         DetectorHit: {
             /** Detector */
             detector: string;
             /** Sub Score */
             sub_score: number;
+        };
+        /**
+         * DetectorVerdict
+         * @description One detector's result, whether it fired or not. Showing the passes
+         *     matters as much as the failures: it tells the analyst what was ruled out.
+         */
+        DetectorVerdict: {
+            /** Rank */
+            rank: number;
+            /** Detector */
+            detector: string;
+            /** Label */
+            label: string;
+            /** Alert Type */
+            alert_type: string;
+            /** Compared Against */
+            compared_against: string;
+            /** Status */
+            status: string;
+            /** Merchant Value */
+            merchant_value: number | string | null;
+            /** Baseline Value */
+            baseline_value: number | string | null;
+            /** Deviation */
+            deviation: number | null;
+            /** Band */
+            band: string | null;
+            /** Message */
+            message: string;
+        };
+        /** Diagnostics */
+        Diagnostics: {
+            /** Alert Id */
+            alert_id: number;
+            /** Merchant Id */
+            merchant_id: string;
+            /** Scored Date */
+            scored_date: string;
+            /** Root Cause */
+            root_cause: string | null;
+            /** Detectors */
+            detectors: components["schemas"]["DetectorVerdict"][];
+            statistics: components["schemas"]["Statistics"];
+            hour_density: components["schemas"]["HourDensity"];
+            peer_distribution: components["schemas"]["PeerDistribution"];
+            window: components["schemas"]["BaselineWindow"];
         };
         /** FeatureDivergence */
         FeatureDivergence: {
@@ -215,6 +342,8 @@ export interface components {
             lanes: components["schemas"]["GlossaryTerm"][];
             /** Baseline Methods */
             baseline_methods: components["schemas"]["GlossaryTerm"][];
+            /** Alert Types */
+            alert_types: components["schemas"]["GlossaryTerm"][];
         };
         /**
          * GlossaryTerm
@@ -234,6 +363,112 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * HourDensity
+         * @description 96 bins of 15 minutes, for the KDE plot.
+         */
+        HourDensity: {
+            /** Merchant */
+            merchant: number[];
+            /** Cohort */
+            cohort: number[];
+            /** Threshold */
+            threshold: number;
+            /** Cohort Threshold */
+            cohort_threshold: number;
+            /** Scored Day Hours */
+            scored_day_hours: number[];
+        };
+        /** Ledger */
+        Ledger: {
+            /** Merchant Id */
+            merchant_id: string;
+            /** Date */
+            date: string;
+            /** Count */
+            count: number;
+            /** Total Amount */
+            total_amount: number;
+            /** Outlier Count */
+            outlier_count: number;
+            /** Transactions */
+            transactions: components["schemas"]["LedgerRow"][];
+        };
+        /**
+         * LedgerRow
+         * @description One transaction on the scored day. No PAN hash — that is cardholder
+         *     data and must not cross the API boundary.
+         */
+        LedgerRow: {
+            /** Source Txn Id */
+            source_txn_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Total Amount */
+            total_amount: number;
+            /** Net Amount */
+            net_amount: number | null;
+            /** Is Refund */
+            is_refund: boolean;
+            /** Card Type */
+            card_type: string | null;
+            /** Card Issuing Country */
+            card_issuing_country: string | null;
+            /** Card Issuing Bank */
+            card_issuing_bank: string | null;
+            /** Transaction Status */
+            transaction_status: string | null;
+            /** Currency */
+            currency: string | null;
+            /** Is Outlier */
+            is_outlier: boolean;
+        };
+        /**
+         * PeerDistribution
+         * @description Where this merchant sits against its cohort, for the box plot.
+         */
+        PeerDistribution: {
+            /** Merchant Value */
+            merchant_value: number | null;
+            /** Peer Median */
+            peer_median: number | null;
+            /** Peer Dispersion */
+            peer_dispersion: number | null;
+            /** Peer Q1 */
+            peer_q1: number | null;
+            /** Peer Q3 */
+            peer_q3: number | null;
+            /** Peer Upper Fence */
+            peer_upper_fence: number | null;
+            /** N Merchants */
+            n_merchants: number;
+            /** Peer Values */
+            peer_values: number[];
+        };
+        /** StatBlock */
+        StatBlock: {
+            /** Mean */
+            mean: number | null;
+            /** Median */
+            median: number | null;
+            /** Mad */
+            mad: number | null;
+            /** N */
+            n: number;
+        };
+        /** Statistics */
+        Statistics: {
+            merchant: components["schemas"]["StatBlock"];
+            peer_mcc: components["schemas"]["StatBlock"];
+            peer_subdistrict: components["schemas"]["StatBlock"];
+            /** Modified Z */
+            modified_z: number | null;
+            /** Method */
+            method: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -357,6 +592,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AlertOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_diagnostics_api_alerts__alert_id__diagnostics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Diagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_ledger_api_merchants__merchant_id__transactions_get: {
+        parameters: {
+            query: {
+                date: string;
+            };
+            header?: never;
+            path: {
+                merchant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Ledger"];
                 };
             };
             /** @description Validation Error */
