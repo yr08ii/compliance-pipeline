@@ -17,3 +17,6 @@ dist/
 
 # SDD scratch (progress ledger, briefs, review packages)
 .superpowers/
+
+# Real Data
+real_data/

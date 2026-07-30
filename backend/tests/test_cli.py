@@ -4,6 +4,7 @@ from compliance import cli
 
 
 def test_main_resets_generates_then_runs_pipeline(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "argv", ["compliance-run"])
     calls: list = []
 
     class FakeSession:
@@ -22,7 +23,7 @@ def test_main_resets_generates_then_runs_pipeline(monkeypatch, capsys):
         cli, "generate_history", lambda session, **kw: calls.append("generate")
     )
     monkeypatch.setattr(
-        cli, "run_pipeline", lambda session, as_of=None: (calls.append("pipeline"), 2)[1]
+        cli, "run_pipeline_direct", lambda session, as_of=None: (calls.append("pipeline"), 2)[1]
     )
 
     cli.main()

@@ -7,7 +7,7 @@ Everything here is deterministic: same input, same output, every run. That is
 an audit requirement, not a preference.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -57,6 +57,10 @@ LAG_DAYS = 7
 # Short vs long level comparison — the only thing that sees a slow ramp.
 TREND_SHORT_DAYS = 7
 TREND_LONG_DAYS = 90
+
+# Merchants keep Hong Kong hours, so a trading day is midnight-to-midnight
+# local, not whatever moment the run started.
+HKT = timezone(timedelta(hours=8))
 
 AMOUNT_DETECTOR = "amount_vs_own_baseline"
 PEER_TXN_DETECTOR = "ticket_vs_mcc_peers"
@@ -227,13 +231,34 @@ def route(session: Session) -> dict[str, str]:
     return lanes
 
 
+def scored_day_bounds(as_of: datetime) -> tuple[datetime, datetime]:
+    """The half-open local day a run evaluates: [as_of - 1 day, as_of).
+
+    A nightly run fires at 00:00 and judges the day that just completed, so
+    `as_of = 2026-05-01` scores 2026-04-30. Anchored to local midnight so the
+    window is a trading day rather than a 24-hour slice starting whenever the
+    job happened to run.
+
+    Bounded deliberately. An open-ended `>= as_of` swept in every later
+    transaction, and — worse — produced an empty scored window whenever the
+    data ended before `as_of`. Only the detectors that ignore scored-day data
+    could then fire, which reads as "no single-transaction anomalies" when the
+    truth is that nothing was examined.
+    """
+    local = as_of.astimezone(HKT) if as_of.tzinfo else as_of.replace(tzinfo=HKT)
+    end = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return end - timedelta(days=1), end
+
+
 def _scored_day_amounts(session: Session, merchant_id: str, as_of: datetime) -> list[float]:
-    """Gross amounts on the day being scored (`as_of` onward)."""
+    """Gross amounts on the day being scored."""
+    start, end = scored_day_bounds(as_of)
     return list(
         session.scalars(
             select(Transaction.total_amount).where(
                 Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= as_of,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
             )
         )
@@ -244,11 +269,13 @@ def _scored_day_peak_rate(
     session: Session, merchant_id: str, as_of: datetime, window_minutes: int = 60
 ) -> float:
     """Busiest `window_minutes` on the day being scored."""
+    start, end = scored_day_bounds(as_of)
     stamps = list(
         session.scalars(
             select(Transaction.occurred_at).where(
                 Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= as_of,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
             )
         )
@@ -271,11 +298,13 @@ def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> li
 
 
 def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> list[str]:
+    start, end = scored_day_bounds(as_of)
     return [
         o for o in session.scalars(
             select(Transaction.card_issuing_country).where(
                 Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= as_of,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
                 Transaction.card_issuing_country.is_not(None),
             )
@@ -617,7 +646,9 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
     return hits
 
 
-def score_and_rank(session: Session, hits: list[dict]) -> list[Alert]:
+def score_and_rank(
+    session: Session, hits: list[dict], *, as_of: datetime | None = None
+) -> list[Alert]:
     """Stage 5: one alert per flagged merchant, ranked, with its snapshot.
 
     The feature snapshot is written once and never recomputed — training on
@@ -628,6 +659,7 @@ def score_and_rank(session: Session, hits: list[dict]) -> list[Alert]:
     for rank, h in enumerate(ordered, start=1):
         alert = Alert(
             merchant_id=h["merchant_id"],
+            as_of=as_of,
             lane=h["lane"],
             blended_score=h["sub_score"],
             rank=rank,

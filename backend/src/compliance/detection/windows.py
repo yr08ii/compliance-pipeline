@@ -566,11 +566,15 @@ def merchant_foreign_ratio(
     session: Session, merchant_id: str, as_of: datetime, home_country: str = "HK"
 ) -> float | None:
     """Share of the scored day's transactions on foreign-issued cards."""
+    from compliance.pipeline.stages import scored_day_bounds
+
+    start, end = scored_day_bounds(as_of)
     countries = list(
         session.scalars(
             select(Transaction.card_issuing_country).where(
                 Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= as_of,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
                 Transaction.card_issuing_country.is_not(None),
             )

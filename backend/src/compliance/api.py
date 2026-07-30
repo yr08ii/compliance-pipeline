@@ -4,9 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
 from compliance.models import Alert, Merchant, MerchantProfile
+from datetime import date as _date
+
+from compliance import diagnostics as diag
 from compliance import glossary
 from compliance.schemas import (
     AlertOut,
+    Diagnostics,
+    Ledger,
     BaselineOverview,
     BaselineRow,
     Glossary,
@@ -83,16 +88,66 @@ def create_app() -> FastAPI:
             merchants=rows,
         )
 
+    def _with_metadata(session: Session, alert: Alert) -> AlertOut:
+        """Join the merchant identity an analyst needs to act on the alert.
+
+        Joined at read time rather than copied into the alert row: a corrected
+        MCC description should show through, while `feature_snapshot` stays
+        frozen because that is what the detector actually judged.
+        """
+        merchant = session.get(Merchant, alert.merchant_id)
+        return AlertOut(
+            id=alert.id,
+            merchant_id=alert.merchant_id,
+            lane=alert.lane,
+            blended_score=alert.blended_score,
+            rank=alert.rank,
+            created_at=alert.created_at,
+            triggering_detectors=alert.triggering_detectors,
+            feature_snapshot=alert.feature_snapshot,
+            mcc=merchant.mcc if merchant else None,
+            mcc_description=merchant.mcc_description if merchant else None,
+            merchant_district=merchant.merchant_district if merchant else None,
+            merchant_subdistrict=merchant.merchant_subdistrict if merchant else None,
+            business_nature=merchant.business_nature if merchant else None,
+            merchant_status=merchant.merchant_status if merchant else None,
+            scored_date=diag.scored_date(alert),
+            alert_type=diag.alert_type(alert),
+        )
+
     @app.get("/api/alerts", response_model=list[AlertOut])
-    def list_alerts(session: Session = Depends(get_session)) -> list[Alert]:
-        return list(session.scalars(select(Alert).order_by(Alert.rank)))
+    def list_alerts(session: Session = Depends(get_session)) -> list[AlertOut]:
+        alerts = session.scalars(select(Alert).order_by(Alert.rank))
+        return [_with_metadata(session, a) for a in alerts]
 
     @app.get("/api/alerts/{alert_id}", response_model=AlertOut)
-    def get_alert(alert_id: int, session: Session = Depends(get_session)) -> Alert:
+    def get_alert(alert_id: int, session: Session = Depends(get_session)) -> AlertOut:
         alert = session.get(Alert, alert_id)
         if alert is None:
             raise HTTPException(status_code=404, detail="alert not found")
-        return alert
+        return _with_metadata(session, alert)
+
+    @app.get("/api/alerts/{alert_id}/diagnostics", response_model=Diagnostics)
+    def get_diagnostics(
+        alert_id: int, session: Session = Depends(get_session)
+    ) -> Diagnostics:
+        """Why this alert fired: every detector's verdict, the statistics
+        behind them, and the curves needed to plot the distributions."""
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="alert not found")
+        return Diagnostics(**diag.diagnostics(session, alert))
+
+    @app.get("/api/merchants/{merchant_id}/transactions", response_model=Ledger)
+    def get_ledger(
+        merchant_id: str, date: str, session: Session = Depends(get_session)
+    ) -> Ledger:
+        """Every transaction a merchant processed on one local day."""
+        try:
+            day = _date.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD")
+        return Ledger(**diag.ledger(session, merchant_id, day))
 
     import os
     from pathlib import Path

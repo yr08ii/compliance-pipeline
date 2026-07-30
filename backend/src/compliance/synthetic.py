@@ -97,6 +97,10 @@ SPECS = (
 # being scored. Large enough that a correct detector cannot miss it.
 SPIKE_MULTIPLE = 25.0
 
+# `day` counts backwards from as_of, so the scored day — the completed day a
+# run evaluates — is one step back.
+SCORED_OFFSET = 1
+
 
 def _hour_in_window(spec: MerchantSpec, n: int, per_day: int) -> float:
     """Spread the day's transactions across the merchant's operating window,
@@ -117,8 +121,9 @@ def _ticket(rng: random.Random, spec: MerchantSpec) -> float:
 def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> None:
     """Populate merchants and their transaction history up to `as_of`.
 
-    History spans [as_of - history_days, as_of], so the day at `as_of` is the
-    day the pipeline will score.
+    Injected anomalies land on the **scored day** — `as_of` minus one — because
+    that is the completed day a run evaluates. Putting them on `as_of` itself
+    would place them outside the scored window, where no detector looks.
     """
     rng = random.Random(seed)
     counter = 0
@@ -143,7 +148,7 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
         for day in range(spec.history_days, -1, -1):
             # A burst of ordinary-sized tickets on the scored day.
             per_day = spec.txns_per_day
-            if spec.merchant_id == FLOOD and day == 0:
+            if spec.merchant_id == FLOOD and day == SCORED_OFFSET:
                 per_day = spec.txns_per_day * 12
             occurred_day = as_of - timedelta(days=day)
             # `day` counts backwards, so elapsed time is history_days - day.
@@ -154,9 +159,9 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                 amount = round(_ticket(rng, spec) * growth, 2)
 
                 # Inject the anomaly on the scored day only.
-                if spec.merchant_id == SPIKE and day == 0 and n == 0:
+                if spec.merchant_id == SPIKE and day == SCORED_OFFSET and n == 0:
                     amount = round(spec.typical_ticket * SPIKE_MULTIPLE, 2)
-                if spec.merchant_id == NEWBIE and day == 0 and n == 0:
+                if spec.merchant_id == NEWBIE and day == SCORED_OFFSET and n == 0:
                     amount = 48_000.0
 
                 session.add(
@@ -168,14 +173,14 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                         occurred_at=occurred_day
                         + (
                             timedelta(hours=10, minutes=n * 4)
-                            if spec.merchant_id == BURST and day == 0
+                            if spec.merchant_id == BURST and day == SCORED_OFFSET
                             else timedelta(hours=3)
-                            if spec.merchant_id == NIGHT and day == 0
+                            if spec.merchant_id == NIGHT and day == SCORED_OFFSET
                             else timedelta(hours=_hour_in_window(spec, n, per_day))
                         ),
                         is_refund=False,
                         card_issuing_country=(
-                            "US" if spec.merchant_id == TOURIST and day == 0 else "HK"
+                            "US" if spec.merchant_id == TOURIST and day == SCORED_OFFSET else "HK"
                         ),
                         card_bin="457896",
                         geo=spec.subdistrict,

@@ -73,6 +73,12 @@ class Alert(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.merchant_id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The run's `as_of`. Distinct from created_at, which is wall-clock: a
+    # backfill or a re-run scores a past day, and an auditor needs to know
+    # which day was evaluated, not when the row happened to be written.
+    as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True, default=None
+    )
     lane: Mapped[str] = mapped_column(String)
     blended_score: Mapped[float] = mapped_column(Float)
     rank: Mapped[int] = mapped_column(Integer)

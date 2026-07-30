@@ -32,14 +32,28 @@ def test_no_labels_for_detectors_that_no_longer_exist():
 def test_labels_avoid_the_internal_vocabulary():
     """The point is a sentence an analyst can act on, not a restatement of the
     identifier."""
-    jargon = ("mcc", "baseline", "z-score", "subdistrict", "peer", "vs_")
-    # "sale"/"takings" are vaguer than the source system's own noun. Using a
-    # synonym for transaction adds a translation step instead of removing one.
-    vague = ("sale", "takings", "level ", "run level")
+    # Compliance analysts work with MCC codes and baselines daily — those are
+    # their vocabulary, not jargon, and the feedback asked for them explicitly.
+    # What must not appear is anything vague: "category" and "sale" hide which
+    # grouping or quantity is meant, which is the friction being removed.
+    vague = ("category", "sale", "takings", "run level", "too high")
     for term in glossary.DETECTORS + glossary.FEATURES:
         lowered = term.label.lower()
-        assert not any(word in lowered for word in jargon), term.label
         assert not any(word in lowered for word in vague), term.label
+
+
+def test_every_detector_maps_to_an_alert_type():
+    """An unmapped detector would render an unlabelled badge in the queue."""
+    live = {t.key for t in glossary.DETECTORS}
+    mapped = set(glossary.DETECTOR_ALERT_TYPE)
+    assert live - mapped == set(), f"detectors with no alert type: {live - mapped}"
+    assert mapped - live == set(), f"alert types for removed detectors: {mapped - live}"
+
+
+def test_alert_types_are_all_declared():
+    declared = {t.key for t in glossary.ALERT_TYPES}
+    used = set(glossary.DETECTOR_ALERT_TYPE.values())
+    assert used <= declared, f"undeclared alert types: {used - declared}"
 
 
 def test_endpoint_returns_all_four_vocabularies():
