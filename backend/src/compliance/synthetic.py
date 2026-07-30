@@ -40,6 +40,21 @@ NIGHT = "NIGHT"  # a grocer trading at 3am, when grocers do not
 TOURIST = "TOURIST"  # a residential shop suddenly all foreign cards
 
 
+# Real MCC wording, so a demo run exercises the same header the real data
+# fills in rather than showing a bare code.
+MCC_NAMES = {
+    "5411": "Grocery Stores and Supermarkets",
+    "5944": "Jewelry, Watches, Clocks and Silverware Stores",
+    "5814": "Fast Food Restaurants",
+    "5813": "Drinking Places (Alcoholic Beverages)",
+    "5812": "Eating Places and Restaurants",
+    "5732": "Electronics Stores",
+    "5309": "Duty Free Stores",
+    "6011": "Financial Institutions - Automated Cash Disbursements",
+    "5541": "Service Stations",
+}
+
+
 @dataclass(frozen=True)
 class MerchantSpec:
     merchant_id: str
@@ -139,6 +154,7 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
             Merchant(
                 merchant_id=spec.merchant_id,
                 mcc=spec.mcc,
+                mcc_description=MCC_NAMES.get(spec.mcc),
                 registered_address=spec.subdistrict,
                 merchant_subdistrict=spec.subdistrict,
                 onboarded_at=as_of - timedelta(days=spec.history_days),
