@@ -183,3 +183,76 @@ export function Donut({
     </div>
   );
 }
+
+/** A short explanation attached to a control.
+ *
+ *  Native `title` rather than a custom popover: it is keyboard and screen
+ *  reader accessible for free, and a tooltip that needs its own focus
+ *  management is a tooltip that will get it wrong. */
+export function Hint({
+  text,
+  children,
+}: {
+  text: string;
+  children: ReactNode;
+}) {
+  return (
+    <span title={text} className="inline-flex items-center gap-1">
+      {children}
+    </span>
+  );
+}
+
+/** Page navigation for lists that run to thousands.
+ *
+ *  Shows the range rather than only the page number, because "1–20 of 9,036"
+ *  answers "how much is left?" and "page 1 of 452" does not. */
+export function Pager({
+  page,
+  pages,
+  total,
+  pageSize,
+  onChange,
+}: {
+  page: number;
+  pages: number;
+  total: number;
+  pageSize: number;
+  onChange: (page: number) => void;
+}) {
+  if (total === 0) return null;
+  const first = (page - 1) * pageSize + 1;
+  const last = Math.min(page * pageSize, total);
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] px-5 py-3">
+      <p className="text-[0.85rem] text-[var(--muted)]">
+        <span className="metric-number font-medium text-[var(--text-strong)]">
+          {first.toLocaleString()}–{last.toLocaleString()}
+        </span>{" "}
+        of <span className="metric-number">{total.toLocaleString()}</span>
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onChange(page - 1)}
+          disabled={page <= 1}
+          className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.85rem] font-medium text-[var(--text-strong)] transition hover:bg-[var(--blue-50)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Previous
+        </button>
+        <span className="text-[0.85rem] text-[var(--muted)]">
+          Page {page} of {pages}
+        </span>
+        <button
+          type="button"
+          onClick={() => onChange(page + 1)}
+          disabled={page >= pages}
+          className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.85rem] font-medium text-[var(--text-strong)] transition hover:bg-[var(--blue-50)] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Next
+        </button>
+      </div>
+    </div>
+  );
+}

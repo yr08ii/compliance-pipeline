@@ -75,9 +75,150 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Alerts */
+        /**
+         * List Alerts
+         * @description Alerts still awaiting a decision, newest risk first.
+         *
+         *     Paginated because the queue runs to thousands: loading it whole made
+         *     the screen unusable before the first row appeared. Decided alerts drop
+         *     out — an analyst's queue should hold only what still needs them.
+         */
         get: operations["list_alerts_api_alerts_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Alert Counts
+         * @description Counts per alert type across the whole open queue.
+         *
+         *     Computed server-side because the queue is paginated: counting only the
+         *     visible page would make the filter chips lie about what is waiting.
+         */
+        get: operations["alert_counts_api_alerts_counts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}/disposition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Decide
+         * @description Record an analyst's decision on an alert.
+         *
+         *     A confirmed alert opens a case and quarantines its day from future
+         *     baselines. A cleared one leaves the data in — the trading was
+         *     legitimate, and removing it would teach the system otherwise.
+         */
+        post: operations["decide_api_alerts__alert_id__disposition_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Cases
+         * @description Confirmed cases. Stale ones first — the board exists to surface
+         *     what has been forgotten.
+         */
+        get: operations["list_cases_api_cases_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cases/{disposition_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Case */
+        get: operations["get_case_api_cases__disposition_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cases/{disposition_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add Case Event
+         * @description Append a stage to a case timeline.
+         */
+        post: operations["add_case_event_api_cases__disposition_id__events_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Settings
+         * @description Current detection thresholds, with the shipped defaults alongside
+         *     so the UI can show what has been changed from stock.
+         */
+        get: operations["read_settings_api_settings_get"];
+        /**
+         * Write Settings
+         * @description Update detection thresholds.
+         *
+         *     Takes effect on the next pipeline run, not retroactively: existing
+         *     alerts were judged under the thresholds in force at the time, and
+         *     rewriting that history would break the audit trail.
+         */
+        put: operations["write_settings_api_settings_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -193,6 +334,19 @@ export interface components {
             /** Alert Type */
             alert_type?: string | null;
         };
+        /** AlertPage */
+        AlertPage: {
+            /** Total */
+            total: number;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Pages */
+            pages: number;
+            /** Items */
+            items: components["schemas"]["AlertOut"][];
+        };
         /**
          * BaselineOverview
          * @description What the baselines are built from, and what changes next run.
@@ -265,6 +419,128 @@ export interface components {
             /** Quarantined Days */
             quarantined_days: number | null;
         };
+        /** CaseDetail */
+        CaseDetail: {
+            /** Disposition Id */
+            disposition_id: number;
+            /** Alert Id */
+            alert_id: number;
+            /** Merchant Id */
+            merchant_id: string;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Risk Axis */
+            risk_axis: string;
+            /** Stage */
+            stage: string;
+            /** Stage Label */
+            stage_label: string;
+            /** Is Resolved */
+            is_resolved: boolean;
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /**
+             * Last Update
+             * Format: date-time
+             */
+            last_update: string;
+            /** Days Since Update */
+            days_since_update: number;
+            /** Is Stale */
+            is_stale: boolean;
+            /** Notes */
+            notes: string | null;
+            /** Analyst Id */
+            analyst_id: string;
+            /** Scored Date */
+            scored_date: string | null;
+            /** Events */
+            events: components["schemas"]["CaseEventOut"][];
+        };
+        /** CaseEventIn */
+        CaseEventIn: {
+            /** Event Type */
+            event_type: string;
+            /** Note */
+            note?: string | null;
+            /** Actor */
+            actor: string;
+        };
+        /** CaseEventOut */
+        CaseEventOut: {
+            /** Id */
+            id: number;
+            /** Event Type */
+            event_type: string;
+            /** Label */
+            label: string;
+            /** Note */
+            note: string | null;
+            /** Actor */
+            actor: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+        };
+        /** CasePage */
+        CasePage: {
+            /** Total */
+            total: number;
+            /** Page */
+            page: number;
+            /** Page Size */
+            page_size: number;
+            /** Pages */
+            pages: number;
+            /** Items */
+            items: components["schemas"]["CaseSummary"][];
+        };
+        /** CaseSummary */
+        CaseSummary: {
+            /** Disposition Id */
+            disposition_id: number;
+            /** Alert Id */
+            alert_id: number;
+            /** Merchant Id */
+            merchant_id: string;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** Reason Code */
+            reason_code: string;
+            /** Risk Axis */
+            risk_axis: string;
+            /** Stage */
+            stage: string;
+            /** Stage Label */
+            stage_label: string;
+            /** Is Resolved */
+            is_resolved: boolean;
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /**
+             * Last Update
+             * Format: date-time
+             */
+            last_update: string;
+            /** Days Since Update */
+            days_since_update: number;
+            /** Is Stale */
+            is_stale: boolean;
+        };
         /** DetectorHit */
         DetectorHit: {
             /** Detector */
@@ -317,6 +593,54 @@ export interface components {
             hour_density: components["schemas"]["HourDensity"];
             peer_distribution: components["schemas"]["PeerDistribution"];
             window: components["schemas"]["BaselineWindow"];
+        };
+        /**
+         * DispositionIn
+         * @description An analyst's decision on an alert.
+         *
+         *     `reason_code` is required, not optional: a verdict without one teaches the
+         *     model nothing and leaves an auditor with an unexplained decision.
+         */
+        DispositionIn: {
+            /** Verdict */
+            verdict: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Risk Axis */
+            risk_axis: string;
+            /**
+             * Action Taken
+             * @default NONE
+             */
+            action_taken: string;
+            /** Analyst Id */
+            analyst_id: string;
+            /** Notes */
+            notes?: string | null;
+        };
+        /** DispositionOut */
+        DispositionOut: {
+            /** Id */
+            id: number;
+            /** Alert Id */
+            alert_id: number;
+            /** Verdict */
+            verdict: string;
+            /** Reason Code */
+            reason_code: string;
+            /** Risk Axis */
+            risk_axis: string;
+            /** Action Taken */
+            action_taken: string;
+            /** Analyst Id */
+            analyst_id: string;
+            /** Notes */
+            notes: string | null;
+            /**
+             * Decided At
+             * Format: date-time
+             */
+            decided_at: string;
         };
         /** FeatureDivergence */
         FeatureDivergence: {
@@ -556,6 +880,39 @@ export interface operations {
     };
     list_alerts_api_alerts_get: {
         parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                alert_type?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    alert_counts_api_alerts_counts_get: {
+        parameters: {
             query?: never;
             header?: never;
             path?: never;
@@ -569,7 +926,202 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AlertOut"][];
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    decide_api_alerts__alert_id__disposition_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DispositionIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispositionOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_cases_api_cases_get: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                resolved?: boolean | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CasePage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_case_api_cases__disposition_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                disposition_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaseDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_case_event_api_cases__disposition_id__events_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                disposition_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CaseEventIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaseEventOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_settings_api_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    write_settings_api_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

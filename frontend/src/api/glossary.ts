@@ -16,6 +16,7 @@ export type Lookup = {
   feature: (key: string) => string;
   lane: (key: string) => string;
   alertType: (key: string) => string;
+  alertTypeMeaning: (key: string) => string;
   method: (key: string) => string;
   all: Glossary | null;
 };
@@ -55,6 +56,7 @@ export function useGlossary(): Lookup {
     },
     lane: (k) => lanes.get(k)?.label ?? k,
     alertType: (k) => alertTypes.get(k)?.label ?? k,
+    alertTypeMeaning: (k) => alertTypes.get(k)?.meaning ?? "",
     method: (k) => methods.get(k)?.label ?? k,
     all: g,
   };

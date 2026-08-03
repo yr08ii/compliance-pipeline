@@ -9,6 +9,7 @@ import {
 import { useGlossary } from "../api/glossary";
 import { HourDensityPlot, PeerBoxPlot } from "../lib/charts";
 import { Card, ErrorNote, Loading, Pill, type Tone } from "../lib/ui";
+import { DecisionPanel } from "./DecisionPanel";
 import { cn } from "../lib/utils";
 
 const ALERT_TYPE_TONE: Record<string, Tone> = {
@@ -69,6 +70,23 @@ function MerchantHeader({ alert, g }: { alert: AlertOut; g: ReturnType<typeof us
 
 type TabKey = "why" | "ledger" | "stats";
 
+/** Which indicators each piece of evidence actually speaks to.
+ *
+ *  The three views are not interchangeable: the amount table addresses the
+ *  amount comparisons, the box plot addresses only the merchant-vs-peer
+ *  level question, and the hours curve addresses only timing. Showing all
+ *  three for every alert implies each is evidence for the alert at hand,
+ *  which is how a KDE plot ends up next to an amount anomaly. */
+const AMOUNT_INDICATORS = [
+  "amount_vs_own_baseline",
+  "amount_vs_payment_method_baseline",
+  "ticket_vs_mcc_peers",
+  "ticket_vs_subdistrict_peers",
+  "merchant_level_vs_mcc_peers",
+];
+const PEER_LEVEL_INDICATORS = ["merchant_level_vs_mcc_peers", "ticket_vs_mcc_peers"];
+const TIMING_INDICATORS = ["hour_vs_own_pattern", "hour_vs_mcc_peers"];
+
 export default function CaseReview() {
   const g = useGlossary();
   const { id } = useParams();
@@ -77,6 +95,11 @@ export default function CaseReview() {
   const [ledger, setLedger] = useState<Ledger | null>(null);
   const [tab, setTab] = useState<TabKey>("why");
   const [error, setError] = useState(false);
+  // Which indicator the analyst is looking at. Defaults to the one that
+  // raised the alert they clicked — landing on all twelve is what made the
+  // page unreadable. "all" widens it to everything that fired for the merchant.
+  const [focus, setFocus] = useState<string>("firing");
+  const [decided, setDecided] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -101,10 +124,38 @@ export default function CaseReview() {
   const passed = diag?.detectors.filter((d) => d.status === "OK") ?? [];
   const skipped = diag?.detectors.filter((d) => d.status === "SKIP") ?? [];
 
-  const TABS: [TabKey, string][] = [
-    ["why", "Why it fired"],
-    ["ledger", `Transactions${ledger ? ` (${ledger.count})` : ""}`],
-    ["stats", "Statistical proof"],
+  // The detector that raised THIS alert, as opposed to everything that
+  // happened to fire for the merchant that night.
+  const firingDetector = alert.triggering_detectors[0]?.detector ?? "";
+
+  const focusOptions: [string, string][] = [
+    ["firing", `This alert — ${g.detector(firingDetector)}`],
+    ["all", `All indicators that fired (${fired.length})`],
+    ...fired
+      .filter((d) => d.detector !== firingDetector)
+      .map((d) => [d.detector, d.label] as [string, string]),
+  ];
+
+  const inFocus = (detector: string) =>
+    focus === "all" ? true : focus === "firing" ? detector === firingDetector : detector === focus;
+
+  const visibleDetectors =
+    focus === "all"
+      ? diag?.detectors ?? []
+      : (diag?.detectors ?? []).filter((d) => inFocus(d.detector));
+
+  const TABS: [TabKey, string, string][] = [
+    ["why", "Why it fired", "The checks that ran, and what each concluded."],
+    [
+      "ledger",
+      `Transactions${ledger ? ` (${ledger.count})` : ""}`,
+      "Every transaction on the day this alert evaluated.",
+    ],
+    [
+      "stats",
+      "Statistical proof",
+      "The numbers and distributions the decision was based on.",
+    ],
   ];
 
   return (
@@ -153,12 +204,50 @@ export default function CaseReview() {
         </div>
       </Card>
 
+      {decided ? (
+        <Card>
+          <p className="px-5 py-4 text-[0.92rem] text-[var(--success)]">
+            Decision recorded. This alert has left the review queue.
+          </p>
+        </Card>
+      ) : (
+        <DecisionPanel alert={alert} onDecided={() => setDecided(true)} />
+      )}
+
+      {/* One selector drives all three tabs, so switching tabs keeps the
+          analyst looking at the same indicator rather than resetting. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="text-[0.82rem] font-medium text-[var(--muted)]" htmlFor="focus">
+          Showing
+        </label>
+        <select
+          id="focus"
+          value={focus}
+          onChange={(e) => setFocus(e.target.value)}
+          title="Narrow every tab to one indicator, or widen to everything that fired for this merchant."
+          className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.85rem] font-medium text-[var(--text-strong)]"
+        >
+          {focusOptions.map(([key, label]) => (
+            <option key={key} value={key}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {focus === "firing" && fired.length > 1 && (
+          <span className="text-[0.82rem] text-[var(--muted)]">
+            {fired.length - 1} other indicator{fired.length === 2 ? "" : "s"} also fired for
+            this merchant — switch to see them.
+          </span>
+        )}
+      </div>
+
       <div className="flex gap-1 border-b border-[var(--border)]" role="tablist">
-        {TABS.map(([key, label]) => (
+        {TABS.map(([key, label, hint]) => (
           <button
             key={key}
             type="button"
             role="tab"
+            title={hint}
             aria-selected={tab === key}
             onClick={() => setTab(key)}
             className={cn(
@@ -175,8 +264,18 @@ export default function CaseReview() {
 
       {tab === "why" && (
         <Card
-          title="Every check that ran"
-          subtitle="Passes matter as much as failures — they show what was ruled out"
+          title={
+            focus === "all"
+              ? "Every check that ran"
+              : focus === "firing"
+                ? "The indicator that raised this alert"
+                : "Selected indicator"
+          }
+          subtitle={
+            focus === "all"
+              ? "Passes matter as much as failures — they show what was ruled out"
+              : "Widen the selector above to see the other checks"
+          }
         >
           {!diag ? (
             <p className="px-5 py-8 text-center text-[0.9rem] text-[var(--muted)]">
@@ -195,7 +294,7 @@ export default function CaseReview() {
                 </tr>
               </thead>
               <tbody>
-                {diag.detectors.map((d) => (
+                {visibleDetectors.map((d) => (
                   <tr
                     key={d.detector}
                     className={cn(
@@ -204,7 +303,14 @@ export default function CaseReview() {
                     )}
                   >
                     <td className="px-5 py-3">
-                      <p className="font-medium text-[var(--text-strong)]">{d.label}</p>
+                      <p className="font-medium text-[var(--text-strong)]">
+                        {d.label}
+                        {d.detector === firingDetector && (
+                          <span className="ml-2 rounded-full bg-[var(--danger-bg)] px-2 py-0.5 text-[0.7rem] font-semibold text-[var(--danger)]">
+                            raised this alert
+                          </span>
+                        )}
+                      </p>
                       <p className="mt-0.5 text-[0.82rem] leading-5 text-[var(--muted)]">
                         {d.message}
                       </p>
@@ -237,7 +343,7 @@ export default function CaseReview() {
             ledger
               ? `${ledger.count} transactions · ${num(ledger.total_amount, 0)} total · ${
                   ledger.outlier_count
-                } above this merchant's own threshold`
+                } marked as contributing`
               : "The day this alert evaluated"
           }
         >
@@ -249,6 +355,14 @@ export default function CaseReview() {
               against the rolling baseline rather than a single day's activity.
             </p>
           ) : (
+            <>
+            <p className="border-b border-[var(--border)] px-5 py-3 text-[0.86rem] leading-6 text-[var(--muted)]">
+              Highlighted rows exceeded this merchant&rsquo;s own amount threshold —
+              the transactions that drove{" "}
+              {focus === "all" ? "the amount indicators" : g.detector(focus === "firing" ? firingDetector : focus)}.
+              Indicators judged on count, timing or card origin have no single driving
+              transaction; the whole day is the evidence.
+            </p>
             <table className="w-full text-left text-[0.86rem]">
               <thead className="border-b border-[var(--border)] text-[0.7rem] uppercase tracking-[0.12em] text-[var(--muted)]">
                 <tr>
@@ -306,96 +420,151 @@ export default function CaseReview() {
                 ))}
               </tbody>
             </table>
+            </>
           )}
         </Card>
       )}
 
       {tab === "stats" && diag && (
         <div className="space-y-4">
-          <Card
-            title="Merchant against its peer groups"
-            subtitle={`Baseline: ${diag.window.window_days ?? "—"}-day window ending ${
-              diag.window.window_end?.slice(0, 10) ?? "—"
-            }, lagged ${diag.window.lag_days ?? "—"} days`}
-          >
-            <table className="w-full text-left text-[0.88rem]">
-              <thead className="border-b border-[var(--border)] text-[0.7rem] uppercase tracking-[0.12em] text-[var(--muted)]">
-                <tr>
-                  <th className="px-5 py-3 font-semibold">Group</th>
-                  <th className="px-5 py-3 text-right font-semibold">Mean</th>
-                  <th className="px-5 py-3 text-right font-semibold">Median</th>
-                  <th className="px-5 py-3 text-right font-semibold">MAD</th>
-                  <th className="px-5 py-3 text-right font-semibold">N</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[
-                  ["This merchant", diag.statistics.merchant],
-                  [`MCC ${alert.mcc ?? ""} peers`, diag.statistics.peer_mcc],
-                  [`${alert.merchant_subdistrict ?? "District"} peers`, diag.statistics.peer_subdistrict],
-                ].map(([label, s]) => {
-                  const stat = s as typeof diag.statistics.merchant;
-                  return (
-                    <tr key={label as string} className="border-b border-[var(--border)] last:border-b-0">
-                      <td className="px-5 py-3 font-medium text-[var(--text-strong)]">
-                        {label as string}
-                      </td>
-                      <td className="px-5 py-3 text-right metric-number">{num(stat.mean)}</td>
-                      <td className="px-5 py-3 text-right metric-number">{num(stat.median)}</td>
-                      <td className="px-5 py-3 text-right metric-number">{num(stat.mad)}</td>
-                      <td className="px-5 py-3 text-right metric-number">{stat.n}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-[var(--border)] px-5 py-3 text-[0.88rem]">
-              <span className="text-[var(--muted)]">
-                Modified z-score{" "}
-                <span className="metric-number font-semibold text-[var(--text-strong)]">
-                  {diag.statistics.modified_z == null
-                    ? "—"
-                    : diag.statistics.modified_z.toFixed(1)}
-                </span>
-              </span>
-              <span className="text-[var(--muted)]">
-                Baseline method{" "}
-                <span className="font-medium text-[var(--text-strong)]">
-                  {g.method(diag.statistics.method)}
-                </span>
-              </span>
-              <span className="text-[0.82rem] text-[var(--muted)]">
-                Flagged above 3.5. Mean is shown beside median so the skew is visible — the
-                detectors use the median because a few large transactions drag a mean.
-              </span>
-            </div>
-          </Card>
+          {(() => {
+            const shows = (group: string[]) =>
+              focus === "all"
+                ? true
+                : group.includes(focus === "firing" ? firingDetector : focus);
+            const anything =
+              shows(AMOUNT_INDICATORS) || shows(PEER_LEVEL_INDICATORS) || shows(TIMING_INDICATORS);
 
-          <Card title="Where this merchant sits in its MCC peer distribution">
-            <PeerBoxPlot
-              label="Typical transaction amount against MCC peers"
-              merchantValue={diag.peer_distribution.merchant_value}
-              peerMedian={diag.peer_distribution.peer_median}
-              peerQ1={diag.peer_distribution.peer_q1}
-              peerQ3={diag.peer_distribution.peer_q3}
-              peerFence={diag.peer_distribution.peer_upper_fence}
-              peerValues={diag.peer_distribution.peer_values}
-            />
-          </Card>
+            return (
+              <>
+                {!anything && (
+                  <Card>
+                    <p className="px-5 py-6 text-[0.92rem] text-[var(--muted)]">
+                      No distribution evidence applies to this indicator. Counts and
+                      velocity are judged directly against the merchant&rsquo;s own
+                      history — see the &ldquo;Why it fired&rdquo; tab for the figures.
+                      Widen the selector above to see all evidence for this merchant.
+                    </p>
+                  </Card>
+                )}
 
-          <Card
-            title="Trading hours"
-            subtitle="Estimated density of when this merchant trades, against its MCC peers"
-          >
-            <HourDensityPlot
-              merchant={diag.hour_density.merchant}
-              cohort={diag.hour_density.cohort}
-              threshold={diag.hour_density.threshold}
-              scoredHours={diag.hour_density.scored_day_hours}
-            />
-          </Card>
+                {shows(AMOUNT_INDICATORS) && (
+                  <Card
+                    title="Amount comparison"
+                    subtitle="Evidence for the amount indicators — not for timing or volume"
+                  >
+                    <p className="border-b border-[var(--border)] px-5 py-3 text-[0.88rem] leading-6 text-[var(--muted)]">
+                      This table addresses whether transaction <em>amounts</em> were
+                      unusual. Baseline: {diag.window.window_days ?? "—"}-day window
+                      ending {diag.window.window_end?.slice(0, 10) ?? "—"}, lagged{" "}
+                      {diag.window.lag_days ?? "—"} days.
+                    </p>
+                    <table className="w-full text-left text-[0.88rem]">
+                      <thead className="border-b border-[var(--border)] text-[0.7rem] uppercase tracking-[0.12em] text-[var(--muted)]">
+                        <tr>
+                          <th className="px-5 py-3 font-semibold">Group</th>
+                          <th className="px-5 py-3 text-right font-semibold">Mean</th>
+                          <th className="px-5 py-3 text-right font-semibold">Median</th>
+                          <th className="px-5 py-3 text-right font-semibold">MAD</th>
+                          <th className="px-5 py-3 text-right font-semibold">N</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[
+                          ["This merchant", diag.statistics.merchant],
+                          [`MCC ${alert.mcc ?? ""} peers`, diag.statistics.peer_mcc],
+                          [
+                            `${alert.merchant_subdistrict ?? "District"} peers`,
+                            diag.statistics.peer_subdistrict,
+                          ],
+                        ].map(([label, s]) => {
+                          const stat = s as typeof diag.statistics.merchant;
+                          return (
+                            <tr
+                              key={label as string}
+                              className="border-b border-[var(--border)] last:border-b-0"
+                            >
+                              <td className="px-5 py-3 font-medium text-[var(--text-strong)]">
+                                {label as string}
+                              </td>
+                              <td className="px-5 py-3 text-right metric-number">
+                                {num(stat.mean)}
+                              </td>
+                              <td className="px-5 py-3 text-right metric-number">
+                                {num(stat.median)}
+                              </td>
+                              <td className="px-5 py-3 text-right metric-number">
+                                {num(stat.mad)}
+                              </td>
+                              <td className="px-5 py-3 text-right metric-number">{stat.n}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-[var(--border)] px-5 py-3 text-[0.88rem]">
+                      <span className="text-[var(--muted)]">
+                        Modified z-score{" "}
+                        <span className="metric-number font-semibold text-[var(--text-strong)]">
+                          {diag.statistics.modified_z == null
+                            ? "—"
+                            : diag.statistics.modified_z.toFixed(1)}
+                        </span>
+                      </span>
+                      <span className="text-[0.82rem] text-[var(--muted)]">
+                        Mean sits beside median so the skew is visible — the detectors use
+                        the median because a few large transactions drag a mean.
+                      </span>
+                    </div>
+                  </Card>
+                )}
+
+                {shows(PEER_LEVEL_INDICATORS) && (
+                  <Card
+                    title="Position within the MCC peer distribution"
+                    subtitle="Evidence for the merchant-level peer comparison only"
+                  >
+                    <p className="border-b border-[var(--border)] px-5 py-3 text-[0.88rem] leading-6 text-[var(--muted)]">
+                      This plot addresses one question: is this merchant&rsquo;s typical
+                      transaction amount out of line with others sharing its MCC? It says
+                      nothing about timing, volume, or any single transaction.
+                    </p>
+                    <PeerBoxPlot
+                      label="Typical transaction amount against MCC peers"
+                      merchantValue={diag.peer_distribution.merchant_value}
+                      peerMedian={diag.peer_distribution.peer_median}
+                      peerQ1={diag.peer_distribution.peer_q1}
+                      peerQ3={diag.peer_distribution.peer_q3}
+                      peerFence={diag.peer_distribution.peer_upper_fence}
+                      peerValues={diag.peer_distribution.peer_values}
+                    />
+                  </Card>
+                )}
+
+                {shows(TIMING_INDICATORS) && (
+                  <Card
+                    title="Trading hours"
+                    subtitle="Evidence for the timing indicators only"
+                  >
+                    <p className="border-b border-[var(--border)] px-5 py-3 text-[0.88rem] leading-6 text-[var(--muted)]">
+                      This plot addresses <em>when</em> the merchant trades, against its own
+                      history and its MCC peers. It says nothing about amounts. Marks along
+                      the axis are the scored day&rsquo;s transactions.
+                    </p>
+                    <HourDensityPlot
+                      merchant={diag.hour_density.merchant}
+                      cohort={diag.hour_density.cohort}
+                      threshold={diag.hour_density.threshold}
+                      scoredHours={diag.hour_density.scored_day_hours}
+                    />
+                  </Card>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
+
     </div>
   );
 }

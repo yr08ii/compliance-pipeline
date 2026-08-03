@@ -5,12 +5,14 @@ import CaseReview from "./screens/CaseReview";
 import Dashboard from "./screens/Dashboard";
 import FollowThrough from "./screens/FollowThrough";
 import ModelInfo from "./screens/ModelInfo";
+import Tuning from "./screens/Tuning";
 import {
   IconBaselines,
   IconCases,
   IconDashboard,
   IconModel,
   IconQueue,
+  IconSettings,
 } from "./lib/icons";
 import { cn } from "./lib/utils";
 
@@ -19,6 +21,7 @@ const NAV = [
   { to: "/queue", label: "Alert queue", Icon: IconQueue },
   { to: "/cases", label: "Case follow-through", Icon: IconCases },
   { to: "/baselines", label: "Baselines", Icon: IconBaselines },
+  { to: "/tuning", label: "Tuning", Icon: IconSettings },
   { to: "/model", label: "Model info", Icon: IconModel },
 ];
 
@@ -26,9 +29,19 @@ const NAV = [
  *  rather than repeating one slogan on every screen. */
 const PAGE: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Overview", subtitle: "Last night's run and what needs attention today" },
-  "/queue": { title: "Alert queue", subtitle: "Merchants to review, highest risk first" },
-  "/cases": { title: "Case follow-through", subtitle: "Confirmed cases tracked to resolution" },
+  "/queue": {
+    title: "Alert queue",
+    subtitle: "Alerts awaiting a decision, highest risk first",
+  },
+  "/cases": {
+    title: "Case follow-through",
+    subtitle: "Confirmed alerts, tracked to resolution",
+  },
   "/baselines": { title: "Baselines", subtitle: "What each merchant is currently judged against" },
+  "/tuning": {
+    title: "Tuning",
+    subtitle: "Detection thresholds — applied on the next run, not retroactively",
+  },
   "/model": { title: "Model info", subtitle: "How alerts are raised, and what each reason means" },
 };
 
@@ -120,7 +133,8 @@ export default function App() {
               <Route path="/case/:id" element={<CaseReview />} />
               <Route path="/cases" element={<FollowThrough />} />
               <Route path="/baselines" element={<Baselines />} />
-              <Route path="/model" element={<ModelInfo />} />
+              <Route path="/tuning" element={<Tuning />} />
+            <Route path="/model" element={<ModelInfo />} />
             </Routes>
           </div>
         </main>
