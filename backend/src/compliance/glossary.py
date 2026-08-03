@@ -101,6 +101,13 @@ DETECTORS: tuple[Term, ...] = (
         "Subdistrict peer group",
     ),
     Term(
+        "amount_vs_payment_method_baseline",
+        "Amount anomaly for this payment method",
+        "A transaction far larger than this merchant normally takes on that payment "
+        "method. HKD 3,000 on Octopus is remarkable; the same on Visa is not.",
+        "Own history, per payment method",
+    ),
+    Term(
         "foreign_card_ratio_vs_subdistrict",
         "Overseas card share vs subdistrict baseline",
         "A far higher share of transactions on overseas-issued cards than other merchants "
@@ -131,6 +138,7 @@ FEATURES: tuple[Term, ...] = (
          "The value of a single transaction.", ""),
     Term("daily_count_vs_mcc_peers", "Number of transactions",
          "How many transactions the merchant processed that day.", ""),
+    Term("amount_on_visa", "Transaction amount (Visa)", "Value of a Visa transaction.", ""),
     Term("foreign_card_share_vs_district", "Overseas card share",
          "The share of transactions on cards issued outside Hong Kong.", ""),
 )
@@ -178,6 +186,7 @@ ALERT_TYPES: tuple[Term, ...] = (
 # with no alert type would render an unlabelled badge in the queue.
 DETECTOR_ALERT_TYPE: dict[str, str] = {
     "amount_vs_own_baseline": "single_txn_spike",
+    "amount_vs_payment_method_baseline": "single_txn_spike",
     "count_vs_own_baseline": "single_txn_spike",
     "burst_rate_vs_own_baseline": "single_txn_spike",
     "level_shift_ramp": "mcc_peer_discrepancy",
@@ -198,6 +207,13 @@ def alert_type_for(detector: str) -> str:
     return DETECTOR_ALERT_TYPE.get(detector, "single_txn_spike")
 
 
+def stage_label(key: str) -> str:
+    for term in CASE_STAGES:
+        if term.key == key:
+            return term.label
+    return key
+
+
 def as_dicts(terms: tuple[Term, ...]) -> list[dict]:
     return [
         {
@@ -208,3 +224,51 @@ def as_dicts(terms: tuple[Term, ...]) -> list[dict]:
         }
         for t in terms
     ]
+
+
+# The stages a confirmed case moves through. A controlled vocabulary rather
+# than free text: the follow-through board sorts and ages by stage, and an
+# auditor needs the same words to mean the same thing every time.
+CASE_STAGES: tuple[Term, ...] = (
+    Term("OPENED", "Opened", "Confirmed as a true alert and opened for follow-up.", ""),
+    Term("MERCHANT_CONTACTED", "Merchant contacted",
+         "The merchant has been asked to explain the activity.", ""),
+    Term("DOCUMENTS_REQUESTED", "Documents requested",
+         "Supporting records have been requested.", ""),
+    Term("DOCUMENTS_RECEIVED", "Documents received",
+         "The merchant supplied records; not yet checked.", ""),
+    Term("DOCUMENTS_VERIFIED", "Documents verified",
+         "Records checked and consistent with the transactions.", ""),
+    Term("NO_RESPONSE", "No response",
+         "The merchant could not be reached or did not reply.", ""),
+    Term("ESCALATED_LEGAL", "Escalated to legal",
+         "Referred for legal review. Recorded here; acted on elsewhere.", ""),
+    Term("STR_FILED", "STR filed",
+         "A suspicious transaction report was filed externally. Do not disclose "
+         "this to the merchant.", ""),
+    Term("CLEARED", "Cleared",
+         "Resolved: the merchant was verified as legitimate.", ""),
+    Term("CONFIRMED_ILLICIT", "Confirmed illicit",
+         "Resolved: the activity was confirmed as illicit.", ""),
+    Term("OFFBOARDED", "Offboarded",
+         "Resolved: the merchant was removed from the platform. Recorded here; "
+         "executed elsewhere.", ""),
+)
+
+# Stages that end a case. Anything else leaves it open on the board, where a
+# case with no update for too long is surfaced as stale.
+RESOLVED_STAGES = frozenset({"CLEARED", "CONFIRMED_ILLICIT", "OFFBOARDED"})
+
+VERDICTS: tuple[Term, ...] = (
+    Term("TRUE_POSITIVE", "True alert",
+         "The activity is genuinely suspicious. Opens a case, and the day is "
+         "excluded from future baselines so the system does not learn it as normal.",
+         ""),
+    Term("FALSE_POSITIVE", "False alert",
+         "The activity was legitimate. Stays in the baseline data — removing it "
+         "would teach the system that normal trading is abnormal.", ""),
+    Term("INCONCLUSIVE", "Inconclusive",
+         "Not enough information to decide. Kept as a distinct outcome rather "
+         "than forced into either bucket, which would corrupt the training data.",
+         ""),
+)

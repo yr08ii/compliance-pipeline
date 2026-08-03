@@ -3,13 +3,22 @@ from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
-from compliance.models import Alert, Merchant, MerchantProfile
+from compliance.models import Alert, Disposition, Merchant, MerchantProfile
 from datetime import date as _date
 
+from compliance import cases as case_svc
 from compliance import diagnostics as diag
+from compliance import settings_store
 from compliance import glossary
 from compliance.schemas import (
     AlertOut,
+    AlertPage,
+    CaseDetail,
+    CaseEventIn,
+    CaseEventOut,
+    CasePage,
+    DispositionIn,
+    DispositionOut,
     Diagnostics,
     Ledger,
     BaselineOverview,
@@ -122,12 +131,178 @@ def create_app() -> FastAPI:
             alert_type=diag.alert_type(alert),
         )
 
-    @app.get("/api/alerts", response_model=list[AlertOut])
-    def list_alerts(session: Session = Depends(get_session)) -> list[AlertOut]:
-        alerts = session.scalars(select(Alert).order_by(Alert.rank))
-        # Resolved once for the whole page rather than per row.
+    @app.get("/api/alerts", response_model=AlertPage)
+    def list_alerts(
+        page: int = 1,
+        page_size: int = 20,
+        alert_type: str | None = None,
+        session: Session = Depends(get_session),
+    ) -> AlertPage:
+        """Alerts still awaiting a decision, newest risk first.
+
+        Paginated because the queue runs to thousands: loading it whole made
+        the screen unusable before the first row appeared. Decided alerts drop
+        out — an analyst's queue should hold only what still needs them.
+        """
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+
+        undecided = ~select(Disposition.id).where(
+            Disposition.alert_id == Alert.id
+        ).exists()
+        conditions = [undecided]
+
+        rows = list(session.scalars(select(Alert).where(*conditions).order_by(Alert.rank)))
+        if alert_type:
+            rows = [a for a in rows if diag.alert_type(a) == alert_type]
+
+        total = len(rows)
+        start = (page - 1) * page_size
         names = diag.mcc_descriptions(session)
-        return [_with_metadata(session, a, names) for a in alerts]
+        items = [_with_metadata(session, a, names) for a in rows[start : start + page_size]]
+
+        return AlertPage(
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=max((total + page_size - 1) // page_size, 1),
+            items=items,
+        )
+
+    @app.get("/api/alerts/counts")
+    def alert_counts(session: Session = Depends(get_session)) -> dict:
+        """Counts per alert type across the whole open queue.
+
+        Computed server-side because the queue is paginated: counting only the
+        visible page would make the filter chips lie about what is waiting.
+        """
+        undecided = ~select(Disposition.id).where(
+            Disposition.alert_id == Alert.id
+        ).exists()
+        rows = list(session.scalars(select(Alert).where(undecided)))
+        counts: dict[str, int] = {}
+        for a in rows:
+            key = diag.alert_type(a)
+            counts[key] = counts.get(key, 0) + 1
+        scored = diag.scored_date(rows[0]) if rows else None
+        return {"total": len(rows), "by_type": counts, "scored_date": scored}
+
+    @app.post("/api/alerts/{alert_id}/disposition", response_model=DispositionOut)
+    def decide(
+        alert_id: int, payload: DispositionIn, session: Session = Depends(get_session)
+    ) -> Disposition:
+        """Record an analyst's decision on an alert.
+
+        A confirmed alert opens a case and quarantines its day from future
+        baselines. A cleared one leaves the data in — the trading was
+        legitimate, and removing it would teach the system otherwise.
+        """
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="alert not found")
+
+        existing = session.scalars(
+            select(Disposition).where(Disposition.alert_id == alert_id)
+        ).first()
+        if existing is not None:
+            # The first decision is part of the audit trail; overwriting it
+            # silently would erase who concluded what, and when.
+            raise HTTPException(
+                status_code=409, detail="this alert has already been decided"
+            )
+
+        disposition = case_svc.record_disposition(session, alert, payload.model_dump())
+        session.commit()
+        return disposition
+
+    @app.get("/api/cases", response_model=CasePage)
+    def list_cases(
+        page: int = 1,
+        page_size: int = 20,
+        resolved: bool | None = None,
+        session: Session = Depends(get_session),
+    ) -> CasePage:
+        """Confirmed cases. Stale ones first — the board exists to surface
+        what has been forgotten."""
+        page = max(page, 1)
+        page_size = min(max(page_size, 1), 200)
+        rows = case_svc.list_cases(session, resolved=resolved)
+        total = len(rows)
+        start = (page - 1) * page_size
+        return CasePage(
+            total=total,
+            page=page,
+            page_size=page_size,
+            pages=max((total + page_size - 1) // page_size, 1),
+            items=rows[start : start + page_size],
+        )
+
+    @app.get("/api/cases/{disposition_id}", response_model=CaseDetail)
+    def get_case(
+        disposition_id: int, session: Session = Depends(get_session)
+    ) -> CaseDetail:
+        disposition = session.get(Disposition, disposition_id)
+        if disposition is None:
+            raise HTTPException(status_code=404, detail="case not found")
+        return CaseDetail(**case_svc.case_detail(session, disposition))
+
+    @app.post("/api/cases/{disposition_id}/events", response_model=CaseEventOut)
+    def add_case_event(
+        disposition_id: int,
+        payload: CaseEventIn,
+        session: Session = Depends(get_session),
+    ) -> CaseEventOut:
+        """Append a stage to a case timeline."""
+        disposition = session.get(Disposition, disposition_id)
+        if disposition is None:
+            raise HTTPException(status_code=404, detail="case not found")
+
+        valid = {t.key for t in glossary.CASE_STAGES}
+        if payload.event_type not in valid:
+            # Free-text stages would make the board unsortable and the
+            # timeline unauditable.
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown stage; expected one of {sorted(valid)}",
+            )
+
+        event = case_svc.add_event(session, disposition, payload.model_dump())
+        session.commit()
+        return CaseEventOut(
+            id=event.id,
+            event_type=event.event_type,
+            label=glossary.stage_label(event.event_type),
+            note=event.note,
+            actor=event.actor,
+            occurred_at=event.occurred_at,
+        )
+
+    @app.get("/api/settings")
+    def read_settings(session: Session = Depends(get_session)) -> dict:
+        """Current detection thresholds, with the shipped defaults alongside
+        so the UI can show what has been changed from stock."""
+        return {
+            "current": settings_store.load_settings(session).as_dict(),
+            "defaults": settings_store.DEFAULTS.as_dict(),
+        }
+
+    @app.put("/api/settings")
+    def write_settings(payload: dict, session: Session = Depends(get_session)) -> dict:
+        """Update detection thresholds.
+
+        Takes effect on the next pipeline run, not retroactively: existing
+        alerts were judged under the thresholds in force at the time, and
+        rewriting that history would break the audit trail.
+        """
+        known = settings_store.DEFAULTS.as_dict()
+        merged = {**settings_store.load_settings(session).as_dict()}
+        for key, value in payload.items():
+            if key in known:
+                merged[key] = value
+        settings = settings_store.DetectionSettings(**merged)
+        settings_store.save_settings(session, settings)
+        session.commit()
+        return {"current": settings.as_dict(), "defaults": known}
 
     @app.get("/api/alerts/{alert_id}", response_model=AlertOut)
     def get_alert(alert_id: int, session: Session = Depends(get_session)) -> AlertOut:

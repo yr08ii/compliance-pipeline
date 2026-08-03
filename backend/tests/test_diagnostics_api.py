@@ -188,7 +188,7 @@ class TestAlertDetail:
         assert body["alert_type"] == "single_txn_spike"
 
     def test_queue_rows_carry_the_same_metadata(self, client):
-        row = client.get("/api/alerts").json()[0]
+        row = client.get("/api/alerts").json()["items"][0]
 
         assert row["mcc_description"] == "Grocery Stores & Supermarkets"
         assert row["alert_type"] == "single_txn_spike"

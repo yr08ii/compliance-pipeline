@@ -112,6 +112,22 @@ class CaseEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class DetectionSetting(Base):
+    """Tunable thresholds, keyed so future setting groups can share the table.
+
+    In the database rather than in code because the compliance lead calibrating
+    against real dispositions should not need a deploy to change a number.
+    """
+
+    __tablename__ = "detection_settings"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    updated_by: Mapped[str | None] = mapped_column(String, default=None)
+
+
 class TrainingBatch(Base):
     __tablename__ = "training_batches"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -38,9 +38,11 @@ def test_list_alerts():
     resp = client.get("/api/alerts")
     assert resp.status_code == 200
     body = resp.json()
-    assert len(body) == 1
-    assert body[0]["merchant_id"] == "M001"
-    assert body[0]["lane"] == "A"
+    # The queue is paginated: a page of items plus the totals the pager needs.
+    assert body["total"] == 1
+    assert body["pages"] == 1
+    assert body["items"][0]["merchant_id"] == "M001"
+    assert body["items"][0]["lane"] == "A"
 
 
 def test_get_alert_detail_has_divergence():

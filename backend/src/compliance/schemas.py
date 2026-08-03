@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DetectorHit(BaseModel):
@@ -197,3 +197,88 @@ class Diagnostics(BaseModel):
     hour_density: HourDensity
     peer_distribution: PeerDistribution
     window: BaselineWindow
+
+
+class DispositionIn(BaseModel):
+    """An analyst's decision on an alert.
+
+    `reason_code` is required, not optional: a verdict without one teaches the
+    model nothing and leaves an auditor with an unexplained decision.
+    """
+
+    verdict: str = Field(pattern="^(TRUE_POSITIVE|FALSE_POSITIVE|INCONCLUSIVE)$")
+    reason_code: str = Field(min_length=2)
+    risk_axis: str = Field(pattern="^(REGULATORY|COMMERCIAL|BOTH)$")
+    action_taken: str = "NONE"
+    analyst_id: str = Field(min_length=1)
+    notes: str | None = None
+
+
+class DispositionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    alert_id: int
+    verdict: str
+    reason_code: str
+    risk_axis: str
+    action_taken: str
+    analyst_id: str
+    notes: str | None
+    decided_at: datetime
+
+
+class CaseEventIn(BaseModel):
+    event_type: str
+    note: str | None = None
+    actor: str = Field(min_length=1)
+
+
+class CaseEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    event_type: str
+    label: str
+    note: str | None
+    actor: str
+    occurred_at: datetime
+
+
+class CaseSummary(BaseModel):
+    disposition_id: int
+    alert_id: int
+    merchant_id: str
+    mcc: str | None
+    mcc_description: str | None
+    reason_code: str
+    risk_axis: str
+    stage: str
+    stage_label: str
+    is_resolved: bool
+    opened_at: datetime
+    last_update: datetime
+    days_since_update: int
+    is_stale: bool
+
+
+class CaseDetail(CaseSummary):
+    notes: str | None
+    analyst_id: str
+    scored_date: str | None
+    events: list[CaseEventOut]
+
+
+class Page(BaseModel):
+    """A slice of a list, so a queue of thousands does not arrive at once."""
+
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class AlertPage(Page):
+    items: list[AlertOut]
+
+
+class CasePage(Page):
+    items: list[CaseSummary]
