@@ -1,27 +1,8 @@
 import { useState } from "react";
 import { apiSend, type AlertOut } from "../api/client";
 import { Card } from "../lib/ui";
+import { FALSE_REASONS, TRUE_REASONS } from "../lib/reasons";
 import { cn } from "../lib/utils";
-
-/** Controlled vocabulary, split by verdict. A reason code is what the model
- *  learns from, so free text alone would leave the loop with nothing usable. */
-const TRUE_REASONS: [string, string][] = [
-  ["STRUCTURING_CONFIRMED", "Structuring — amounts split to stay under thresholds"],
-  ["UNEXPLAINED_ACTIVITY", "Merchant could not explain the activity"],
-  ["MCC_MISMATCH", "Activity inconsistent with the declared business"],
-  ["REFUND_ABUSE", "Refunds used to move value"],
-  ["SUSPECTED_LAUNDERING", "Pattern consistent with laundering"],
-  ["OTHER_CONFIRMED", "Other — described in notes"],
-];
-
-const FALSE_REASONS: [string, string][] = [
-  ["SEASONAL_PROMOTION", "Seasonal or promotional surge"],
-  ["VERIFIED_BUSINESS_EXPANSION", "Genuine business growth, verified"],
-  ["LEGITIMATE_LARGE_SALE", "One-off legitimate large transaction"],
-  ["KNOWN_CUSTOMER_PATTERN", "Known and expected customer behaviour"],
-  ["DATA_QUALITY", "Data quality issue, not merchant behaviour"],
-  ["OTHER_CLEARED", "Other — described in notes"],
-];
 
 type Verdict = "TRUE_POSITIVE" | "FALSE_POSITIVE" | "INCONCLUSIVE";
 

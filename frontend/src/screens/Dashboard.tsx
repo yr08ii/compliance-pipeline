@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiGet, type AlertOut, type BaselineOverview } from "../api/client";
+import { apiGet, type AlertOut, type AlertPage, type BaselineOverview } from "../api/client";
 import { useGlossary } from "../api/glossary";
 import { Card, Donut, StatTile } from "../lib/ui";
 import { IconAlert, IconBaselines, IconMerchants, IconShield } from "../lib/icons";
@@ -8,14 +8,25 @@ import { IconAlert, IconBaselines, IconMerchants, IconShield } from "../lib/icon
 export default function Dashboard() {
   const g = useGlossary();
   const [alerts, setAlerts] = useState<AlertOut[]>([]);
+  // Total across the whole queue, not just the page fetched above.
+  const [total, setTotal] = useState(0);
   const [baselines, setBaselines] = useState<BaselineOverview | null>(null);
 
   useEffect(() => {
-    apiGet<AlertOut[]>("/api/alerts").then(setAlerts).catch(() => setAlerts([]));
+    // The queue endpoint is paginated, so the rows live under `items`. Asking
+    // for a few is also all this panel needs — it shows the top five.
+    apiGet<AlertPage>("/api/alerts?page=1&page_size=5")
+      .then((p) => {
+        setAlerts(p.items);
+        setTotal(p.total);
+      })
+      .catch(() => {
+        setAlerts([]);
+        setTotal(0);
+      });
     apiGet<BaselineOverview>("/api/baselines").then(setBaselines).catch(() => undefined);
   }, []);
 
-  const flaggedMerchants = new Set(alerts.map((a) => a.merchant_id)).size;
   const laneA = baselines?.merchants.filter((m) => m.lane === "A").length ?? 0;
   const laneB = baselines?.merchants.filter((m) => m.lane === "B").length ?? 0;
   const top = alerts[0];
@@ -25,15 +36,15 @@ export default function Dashboard() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="Open alerts"
-          value={alerts.length}
-          hint="from last night's run"
+          value={total}
+          hint="awaiting a decision"
           icon={<IconAlert className="h-5 w-5" />}
           tone="warning"
         />
         <StatTile
-          label="Merchants flagged"
-          value={flaggedMerchants}
-          hint={`of ${baselines?.total_count ?? "—"} monitored`}
+          label="Merchants"
+          value={baselines?.total_count ?? "—"}
+          hint="merchants monitored"
           icon={<IconMerchants className="h-5 w-5" />}
           tone="blue"
         />
@@ -57,11 +68,8 @@ export default function Dashboard() {
         <Card title="Tonight's run" subtitle="What the pipeline produced">
           <div className="p-5">
             <p className="text-[0.98rem] leading-7 text-[var(--text)]">
-              The nightly pipeline flagged{" "}
-              <span className="font-semibold text-[var(--text-strong)]">{flaggedMerchants}</span>{" "}
-              merchant{flaggedMerchants === 1 ? "" : "s"} across{" "}
-              <span className="font-semibold text-[var(--text-strong)]">{alerts.length}</span>{" "}
-              alert{alerts.length === 1 ? "" : "s"}.
+              <span className="font-semibold text-[var(--text-strong)]">{total}</span>{" "}
+              alert{total === 1 ? "" : "s"} awaiting a decision.
               {top && (
                 <>
                   {" "}
@@ -115,7 +123,7 @@ export default function Dashboard() {
         }
       >
         <ul className="divide-y divide-[var(--border)]">
-          {alerts.slice(0, 5).map((a) => (
+          {alerts.map((a) => (
             <li key={a.id}>
               <Link
                 to={`/case/${a.id}`}

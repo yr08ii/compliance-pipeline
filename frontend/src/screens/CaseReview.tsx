@@ -128,6 +128,13 @@ export default function CaseReview() {
   // happened to fire for the merchant that night.
   const firingDetector = alert.triggering_detectors[0]?.detector ?? "";
 
+  // The headline must describe the detector named directly above it. The
+  // API's root_cause is a merchant-level summary — it reports the first
+  // failing check of the night, which is often a different one — so using it
+  // here put a subtitle about the own-history baseline under a heading about
+  // the subdistrict baseline.
+  const firingVerdict = diag?.detectors.find((d) => d.detector === firingDetector);
+
   const focusOptions: [string, string][] = [
     ["firing", `This alert — ${g.detector(firingDetector)}`],
     ["all", `All indicators that fired (${fired.length})`],
@@ -179,9 +186,16 @@ export default function CaseReview() {
             <h2 className="mt-2 text-[1.35rem]">
               {g.detector(alert.triggering_detectors[0]?.detector ?? "")}
             </h2>
-            {diag?.root_cause && (
+            {firingVerdict && (
               <p className="mt-1.5 max-w-3xl text-[0.94rem] leading-6 text-[var(--text)]">
-                {diag.root_cause}
+                {firingVerdict.message}
+                {firingVerdict.deviation != null && (
+                  <span className="text-[var(--muted)]">
+                    {" "}
+                    · {firingVerdict.deviation.toFixed(1)}σ from{" "}
+                    {firingVerdict.compared_against?.toLowerCase() ?? "baseline"}
+                  </span>
+                )}
               </p>
             )}
           </div>

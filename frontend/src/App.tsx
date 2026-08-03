@@ -14,6 +14,7 @@ import {
   IconQueue,
   IconSettings,
 } from "./lib/icons";
+import { ErrorBoundary } from "./lib/ErrorBoundary";
 import { cn } from "./lib/utils";
 
 const NAV = [
@@ -66,6 +67,26 @@ function Header() {
         Pipeline ready · runs 00:00
       </div>
     </header>
+  );
+}
+
+/** Routes plus their error boundary. Separate component because it must sit
+ *  inside the Router to read the current path, which is what resets the
+ *  boundary when the operator navigates away from a broken screen. */
+function RoutedContent() {
+  const { pathname } = useLocation();
+  return (
+    <ErrorBoundary resetKey={pathname}>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/queue" element={<AlertQueue />} />
+        <Route path="/case/:id" element={<CaseReview />} />
+        <Route path="/cases" element={<FollowThrough />} />
+        <Route path="/baselines" element={<Baselines />} />
+        <Route path="/tuning" element={<Tuning />} />
+        <Route path="/model" element={<ModelInfo />} />
+      </Routes>
+    </ErrorBoundary>
   );
 }
 
@@ -127,15 +148,7 @@ export default function App() {
         <main id="main" className="min-w-0 flex-1 px-6 py-6 lg:px-8">
           <div className="mx-auto max-w-[1280px] space-y-6">
             <Header />
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/queue" element={<AlertQueue />} />
-              <Route path="/case/:id" element={<CaseReview />} />
-              <Route path="/cases" element={<FollowThrough />} />
-              <Route path="/baselines" element={<Baselines />} />
-              <Route path="/tuning" element={<Tuning />} />
-            <Route path="/model" element={<ModelInfo />} />
-            </Routes>
+            <RoutedContent />
           </div>
         </main>
       </div>

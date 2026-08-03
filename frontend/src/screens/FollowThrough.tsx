@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   apiGet,
@@ -6,6 +6,7 @@ import {
   type CaseDetail,
   type CasePage,
 } from "../api/client";
+import { reasonLabel } from "../lib/reasons";
 import { Card, ErrorNote, Pager, Pill, type Tone } from "../lib/ui";
 import { cn } from "../lib/utils";
 
@@ -236,9 +237,10 @@ export default function FollowThrough() {
               </thead>
               <tbody>
                 {data.items.map((c) => (
-                  <>
+                  // Fragment carries the key: the row and its expanded
+                  // timeline are two siblings for one case.
+                  <Fragment key={c.disposition_id}>
                     <tr
-                      key={c.disposition_id}
                       onClick={() =>
                         setOpen(open === c.disposition_id ? null : c.disposition_id)
                       }
@@ -256,7 +258,9 @@ export default function FollowThrough() {
                           {c.mcc_description ? ` · ${c.mcc_description}` : ""}
                         </p>
                       </td>
-                      <td className="px-5 py-3.5 text-[var(--text)]">{c.reason_code}</td>
+                      <td className="px-5 py-3.5 text-[var(--text)]">
+                        {reasonLabel(c.reason_code)}
+                      </td>
                       <td className="px-5 py-3.5">
                         <Pill tone={STAGE_TONE[c.stage] ?? "neutral"}>{c.stage_label}</Pill>
                       </td>
@@ -281,13 +285,13 @@ export default function FollowThrough() {
                       </td>
                     </tr>
                     {open === c.disposition_id && (
-                      <tr key={`${c.disposition_id}-detail`} className="border-b border-[var(--border)]">
+                      <tr className="border-b border-[var(--border)]">
                         <td colSpan={5} className="p-0">
                           <CaseTimeline caseId={c.disposition_id} onUpdated={load} />
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 ))}
               </tbody>
             </table>
