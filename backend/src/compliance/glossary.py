@@ -33,79 +33,86 @@ class Term:
 DETECTORS: tuple[Term, ...] = (
     Term(
         "amount_vs_own_baseline",
-        "Unusually large transaction",
+        "Amount anomaly vs own baseline",
         "A transaction far larger than this merchant's typical transaction amount.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "count_vs_own_baseline",
-        "Unusual number of transactions",
+        "Transaction count vs own baseline",
         "Far more transactions today than this merchant normally processes in a day.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "burst_rate_vs_own_baseline",
-        "Unusual transaction velocity",
+        "Transaction velocity vs own baseline",
         "Many transactions inside a single hour, well beyond this merchant's usual rate. "
         "The day's total can still look ordinary.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "level_shift_ramp",
-        "Transaction amounts trending up",
+        "Sustained level shift (7d vs 90d)",
         "This merchant's typical transaction amount over the last 7 days is well above its "
         "level over the last 90 days. No single day is unusual on its own.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "hour_vs_own_pattern",
-        "Transaction outside usual hours",
+        "Trading outside own operating hours",
         "A transaction at a time of day this merchant almost never processes transactions.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "card_origin_vs_own_mix",
-        "Unfamiliar card issuing country",
+        "Card origin vs own history",
         "Transactions on cards issued in a country this merchant rarely or never sees.",
-        "Its own history",
+        "Own history",
     ),
     Term(
         "ticket_vs_mcc_peers",
-        "Large transaction for this category",
+        "Amount anomaly vs MCC baseline",
         "A transaction far larger than merchants in the same category normally process.",
-        "Same merchant category",
+        "MCC peer group",
     ),
     Term(
         "merchant_level_vs_mcc_peers",
-        "Typical amount high for this category",
+        "Merchant level vs MCC baseline",
         "This merchant's typical transaction amount is far above others in the same "
         "category. Not one transaction — its whole level.",
-        "Same merchant category",
+        "MCC peer group",
     ),
     Term(
         "count_vs_mcc_peers",
-        "More transactions than its category",
+        "Transaction count vs MCC baseline",
         "Far more transactions today than merchants in the same category normally process.",
-        "Same merchant category",
+        "MCC peer group",
     ),
     Term(
         "hour_vs_mcc_peers",
-        "Transaction outside category hours",
+        "Trading outside MCC operating hours",
         "A transaction at a time of day this merchant category almost never operates.",
-        "Same merchant category",
+        "MCC peer group",
     ),
     Term(
         "ticket_vs_subdistrict_peers",
-        "Large transaction for this district",
+        "Amount anomaly vs subdistrict baseline",
         "A transaction far larger than merchants in the same district normally process.",
-        "Same district",
+        "Subdistrict peer group",
+    ),
+    Term(
+        "amount_vs_payment_method_baseline",
+        "Amount anomaly for this payment method",
+        "A transaction far larger than this merchant normally takes on that payment "
+        "method. HKD 3,000 on Octopus is remarkable; the same on Visa is not.",
+        "Own history, per payment method",
     ),
     Term(
         "foreign_card_ratio_vs_subdistrict",
-        "Overseas card share high for district",
+        "Overseas card share vs subdistrict baseline",
         "A far higher share of transactions on overseas-issued cards than other merchants "
         "in the same district.",
-        "Same district",
+        "Subdistrict peer group",
     ),
 )
 
@@ -131,6 +138,7 @@ FEATURES: tuple[Term, ...] = (
          "The value of a single transaction.", ""),
     Term("daily_count_vs_mcc_peers", "Number of transactions",
          "How many transactions the merchant processed that day.", ""),
+    Term("amount_on_visa", "Transaction amount (Visa)", "Value of a Visa transaction.", ""),
     Term("foreign_card_share_vs_district", "Overseas card share",
          "The share of transactions on cards issued outside Hong Kong.", ""),
 )
@@ -160,6 +168,52 @@ BASELINE_METHODS: tuple[Term, ...] = (
 )
 
 
+# The four families an analyst triages differently. A single-transaction
+# outlier is one checkout to examine; a peer discrepancy is a business-profile
+# question; a temporal or geographic anomaly points somewhere else again.
+ALERT_TYPES: tuple[Term, ...] = (
+    Term("single_txn_spike", "Single txn spike",
+         "One transaction breached this merchant's own bounds on the scored day.", ""),
+    Term("mcc_peer_discrepancy", "MCC peer discrepancy",
+         "The merchant's profile diverges from others sharing its MCC.", ""),
+    Term("subdistrict_anomaly", "Subdistrict anomaly",
+         "Amounts or card origins diverge from the local area baseline.", ""),
+    Term("temporal_anomaly", "Temporal anomaly",
+         "Transactions fell outside established operating hours.", ""),
+)
+
+# Which badge each detector belongs to. Deliberately exhaustive: a detector
+# with no alert type would render an unlabelled badge in the queue.
+DETECTOR_ALERT_TYPE: dict[str, str] = {
+    "amount_vs_own_baseline": "single_txn_spike",
+    "amount_vs_payment_method_baseline": "single_txn_spike",
+    "count_vs_own_baseline": "single_txn_spike",
+    "burst_rate_vs_own_baseline": "single_txn_spike",
+    "level_shift_ramp": "mcc_peer_discrepancy",
+    "hour_vs_own_pattern": "temporal_anomaly",
+    "card_origin_vs_own_mix": "subdistrict_anomaly",
+    "ticket_vs_mcc_peers": "mcc_peer_discrepancy",
+    "merchant_level_vs_mcc_peers": "mcc_peer_discrepancy",
+    "count_vs_mcc_peers": "mcc_peer_discrepancy",
+    "hour_vs_mcc_peers": "temporal_anomaly",
+    "ticket_vs_subdistrict_peers": "subdistrict_anomaly",
+    "foreign_card_ratio_vs_subdistrict": "subdistrict_anomaly",
+}
+
+
+def alert_type_for(detector: str) -> str:
+    """The badge a detector maps to. Falls back so a new detector is visible
+    rather than silently unbadged."""
+    return DETECTOR_ALERT_TYPE.get(detector, "single_txn_spike")
+
+
+def stage_label(key: str) -> str:
+    for term in CASE_STAGES:
+        if term.key == key:
+            return term.label
+    return key
+
+
 def as_dicts(terms: tuple[Term, ...]) -> list[dict]:
     return [
         {
@@ -170,3 +224,51 @@ def as_dicts(terms: tuple[Term, ...]) -> list[dict]:
         }
         for t in terms
     ]
+
+
+# The stages a confirmed case moves through. A controlled vocabulary rather
+# than free text: the follow-through board sorts and ages by stage, and an
+# auditor needs the same words to mean the same thing every time.
+CASE_STAGES: tuple[Term, ...] = (
+    Term("OPENED", "Opened", "Confirmed as a true alert and opened for follow-up.", ""),
+    Term("MERCHANT_CONTACTED", "Merchant contacted",
+         "The merchant has been asked to explain the activity.", ""),
+    Term("DOCUMENTS_REQUESTED", "Documents requested",
+         "Supporting records have been requested.", ""),
+    Term("DOCUMENTS_RECEIVED", "Documents received",
+         "The merchant supplied records; not yet checked.", ""),
+    Term("DOCUMENTS_VERIFIED", "Documents verified",
+         "Records checked and consistent with the transactions.", ""),
+    Term("NO_RESPONSE", "No response",
+         "The merchant could not be reached or did not reply.", ""),
+    Term("ESCALATED_LEGAL", "Escalated to legal",
+         "Referred for legal review. Recorded here; acted on elsewhere.", ""),
+    Term("STR_FILED", "STR filed",
+         "A suspicious transaction report was filed externally. Do not disclose "
+         "this to the merchant.", ""),
+    Term("CLEARED", "Cleared",
+         "Resolved: the merchant was verified as legitimate.", ""),
+    Term("CONFIRMED_ILLICIT", "Confirmed illicit",
+         "Resolved: the activity was confirmed as illicit.", ""),
+    Term("OFFBOARDED", "Offboarded",
+         "Resolved: the merchant was removed from the platform. Recorded here; "
+         "executed elsewhere.", ""),
+)
+
+# Stages that end a case. Anything else leaves it open on the board, where a
+# case with no update for too long is surfaced as stale.
+RESOLVED_STAGES = frozenset({"CLEARED", "CONFIRMED_ILLICIT", "OFFBOARDED"})
+
+VERDICTS: tuple[Term, ...] = (
+    Term("TRUE_POSITIVE", "True alert",
+         "The activity is genuinely suspicious. Opens a case, and the day is "
+         "excluded from future baselines so the system does not learn it as normal.",
+         ""),
+    Term("FALSE_POSITIVE", "False alert",
+         "The activity was legitimate. Stays in the baseline data — removing it "
+         "would teach the system that normal trading is abnormal.", ""),
+    Term("INCONCLUSIVE", "Inconclusive",
+         "Not enough information to decide. Kept as a distinct outcome rather "
+         "than forced into either bucket, which would corrupt the training data.",
+         ""),
+)

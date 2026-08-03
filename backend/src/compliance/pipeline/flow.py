@@ -23,8 +23,8 @@ def _detect(session: Session, lanes: dict[str, str], as_of: datetime) -> list[di
 
 
 @task(cache_policy=NO_CACHE)
-def _score(session: Session, hits: list[dict]) -> int:
-    return len(stages.score_and_rank(session, hits))
+def _score(session: Session, hits: list[dict], as_of: datetime) -> int:
+    return len(stages.score_and_rank(session, hits, as_of=as_of))
 
 
 @flow(name="nightly-compliance-pipeline")
@@ -41,4 +41,17 @@ def run_pipeline(session: Session, as_of: datetime | None = None) -> int:
     _profile(session, as_of)
     lanes = _route(session)
     hits = _detect(session, lanes, as_of)
-    return _score(session, hits)
+    return _score(session, hits, as_of)
+
+
+def run_pipeline_direct(session: Session, as_of: datetime | None = None) -> int:
+    """Run the pipeline stages directly without Prefect overhead.
+
+    Same logic as ``run_pipeline`` but avoids spinning up a temporary
+    Prefect server — use this for CLI runs, tests, and backfills.
+    """
+    as_of = as_of or datetime.now(timezone.utc)
+    stages.profile(session, as_of=as_of)
+    lanes = stages.route(session)
+    hits = stages.detect(session, lanes, as_of=as_of)
+    return len(stages.score_and_rank(session, hits, as_of=as_of))

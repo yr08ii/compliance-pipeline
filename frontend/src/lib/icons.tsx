@@ -107,3 +107,13 @@ export function IconChevron({ className = "h-4 w-4" }: Props) {
     </svg>
   );
 }
+
+export function IconSettings({ className = "h-5 w-5" }: Props) {
+  return (
+    <svg {...base} className={className}>
+      <path d="M4 8h10M18 8h2M4 16h4M12 16h8" />
+      <circle cx="16" cy="8" r="2.2" />
+      <circle cx="10" cy="16" r="2.2" />
+    </svg>
+  );
+}

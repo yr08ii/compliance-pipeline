@@ -161,6 +161,59 @@ def fit_all_baselines(
     }
 
 
+def fit_payment_method_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    min_observations: int,
+    lag_days: int = 0,
+    exclude_quarantined: bool = True,
+) -> dict[str, dict[str, Baseline]]:
+    """Fit a separate amount baseline per merchant per payment rail.
+
+    Rails carry genuinely different amount patterns. Octopus is a stored-value
+    card for transit and small retail, so HKD 3,000 on it is remarkable; the
+    same amount on Visa is unremarkable. Pooling them gives one baseline with a
+    spread wide enough to swallow the Octopus outlier entirely — the rail that
+    most needed watching is the one the pooled view hides.
+
+    Returns {merchant_id: {card_type: Baseline}}. A rail the merchant barely
+    uses comes back unusable rather than fitted, since a merchant that takes
+    Alipay twice a month has no Alipay pattern to be judged against.
+    """
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(
+            Transaction.merchant_id,
+            Transaction.card_type,
+            Transaction.total_amount,
+            Transaction.occurred_at,
+        ).where(
+            Transaction.card_type.is_not(None),
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    grouped: dict[str, dict[str, list[float]]] = {}
+    for merchant_id, card_type, amount, occurred_at in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        grouped.setdefault(merchant_id, {}).setdefault(card_type, []).append(amount)
+
+    return {
+        merchant_id: {
+            rail: fit_baseline(amounts, min_observations=min_observations)
+            for rail, amounts in rails.items()
+        }
+        for merchant_id, rails in grouped.items()
+    }
+
+
 def fit_peer_baselines(
     session: Session,
     as_of: datetime,
@@ -566,11 +619,15 @@ def merchant_foreign_ratio(
     session: Session, merchant_id: str, as_of: datetime, home_country: str = "HK"
 ) -> float | None:
     """Share of the scored day's transactions on foreign-issued cards."""
+    from compliance.pipeline.stages import scored_day_bounds
+
+    start, end = scored_day_bounds(as_of)
     countries = list(
         session.scalars(
             select(Transaction.card_issuing_country).where(
                 Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= as_of,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
                 Transaction.card_issuing_country.is_not(None),
             )

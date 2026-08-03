@@ -73,6 +73,12 @@ class Alert(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.merchant_id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # The run's `as_of`. Distinct from created_at, which is wall-clock: a
+    # backfill or a re-run scores a past day, and an auditor needs to know
+    # which day was evaluated, not when the row happened to be written.
+    as_of: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True, default=None
+    )
     lane: Mapped[str] = mapped_column(String)
     blended_score: Mapped[float] = mapped_column(Float)
     rank: Mapped[int] = mapped_column(Integer)
@@ -104,6 +110,22 @@ class CaseEvent(Base):
     note: Mapped[str | None] = mapped_column(Text, default=None)
     actor: Mapped[str] = mapped_column(String)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DetectionSetting(Base):
+    """Tunable thresholds, keyed so future setting groups can share the table.
+
+    In the database rather than in code because the compliance lead calibrating
+    against real dispositions should not need a deploy to change a number.
+    """
+
+    __tablename__ = "detection_settings"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    updated_by: Mapped[str | None] = mapped_column(String, default=None)
 
 
 class TrainingBatch(Base):
