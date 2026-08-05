@@ -137,6 +137,77 @@ def _stat_block(values: list[float], n: int) -> dict:
     }
 
 
+def frozen_contributions(alert: Alert) -> dict[str, list[dict]]:
+    """The evidence recorded on the alert, keyed by detector.
+
+    Read from the alert rather than recomputed. A later run with retuned
+    thresholds would highlight a different set of transactions, and the
+    analyst must see what the detector actually acted on that night — the same
+    reason `feature_snapshot` is frozen.
+    """
+    out: dict[str, list[dict]] = {}
+    for entry in alert.triggering_detectors or []:
+        rows = entry.get("contributions") or []
+        if rows:
+            out[entry.get("detector", "")] = rows
+    return out
+
+
+def _typology_verdicts(
+    session: Session, alert: Alert, as_of: datetime, metrics: dict, *, start_rank: int
+):
+    """Family B verdicts, recomputed against the rules currently in force."""
+    from compliance.detection.ruleset import Family
+    from compliance.pipeline.merchant_study import study_typologies
+    from compliance.pipeline.stages import typology_input_for
+    from compliance.rules_store import active_rules
+
+    rules = active_rules(session, Family.B)
+    if not rules:
+        return []
+    data = typology_input_for(session, alert.merchant_id, as_of, metrics)
+    if data is None:
+        return []
+    return study_typologies(data, rules, start_rank=start_rank)
+
+
+def _ring_verdicts(alert: Alert, *, start_rank: int):
+    """Family C findings, read back from the alert.
+
+    Not recomputed: a ring is a portfolio-wide result, and re-running the whole
+    cross-merchant pass to render one case page would cost far more than it
+    tells the analyst. What the run found is what the alert carries.
+    """
+    from compliance.detection.ruleset import BY_KEY, Family
+    from compliance.pipeline.merchant_study import DetectorResult
+
+    results = []
+    n = start_rank
+    for entry in alert.triggering_detectors or []:
+        template = BY_KEY.get(entry.get("detector", ""))
+        if template is None or template.family is not Family.C:
+            continue
+        n += 1
+        feature = (alert.feature_snapshot or [{}])[0]
+        results.append(
+            DetectorResult(
+                rank=n,
+                detector=template.key,
+                label=template.label,
+                status="FAIL",
+                merchant_value=feature.get("merchant_value"),
+                baseline_value=feature.get("baseline_value"),
+                deviation=feature.get("deviation"),
+                band="outlier",
+                feature_name=feature.get("feature_name", template.key),
+                message=entry.get("message", template.description),
+                family="C",
+                contributions=tuple(entry.get("contributions") or []),
+            )
+        )
+    return results
+
+
 def diagnostics(session: Session, alert: Alert) -> dict:
     """Everything behind one alert: verdicts, statistics, and plot data."""
     merchant = session.get(Merchant, alert.merchant_id)
@@ -150,6 +221,8 @@ def diagnostics(session: Session, alert: Alert) -> dict:
     as_of = alert.as_of or alert.created_at
     day = fetch_day_data(session, alert.merchant_id, as_of)
     results = study_merchant(metrics, day, lane=alert.lane)
+    results += _typology_verdicts(session, alert, as_of, metrics, start_rank=len(results))
+    results += _ring_verdicts(alert, start_rank=len(results))
 
     labels = {t.key: t for t in glossary.DETECTORS}
     verdicts = [
@@ -167,9 +240,20 @@ def diagnostics(session: Session, alert: Alert) -> dict:
             "deviation": r.deviation,
             "band": r.band,
             "message": r.message,
+            "family": r.family,
+            "contributions": list(r.contributions),
         }
         for r in results
     ]
+
+    # Family A recomputes its verdicts live but has no transaction ids in its
+    # inputs, so its evidence comes from the alert. Where both exist the
+    # frozen set wins: it is what the detector acted on that night.
+    frozen = frozen_contributions(alert)
+    for verdict in verdicts:
+        recorded = frozen.get(verdict["detector"])
+        if recorded:
+            verdict["contributions"] = recorded
 
     # Statistics: the merchant's own scored-day amounts against the two peer
     # cohorts. Peer values are the cohort's fitted centre and spread, which is

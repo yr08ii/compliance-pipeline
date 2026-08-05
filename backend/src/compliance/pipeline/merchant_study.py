@@ -68,7 +68,7 @@ _LABELS: dict[str, str] = {t.key: t.label for t in GLOSSARY_DETECTORS}
 class DetectorResult:
     """One detector's verdict for a single merchant on a single scored day."""
 
-    rank: int  # display order (1-12)
+    rank: int  # display order
     detector: str  # internal key
     label: str  # human-readable from glossary
     status: str  # "OK" | "FAIL" | "SKIP"
@@ -78,6 +78,14 @@ class DetectorResult:
     band: str | None  # "normal" | "moderate" | "outlier"
     feature_name: str  # for root-cause messaging
     message: str  # plain-English explanation
+    # Which family produced it. The three answer different questions and an
+    # analyst triages them differently, so the panel groups by this rather
+    # than presenting one undifferentiated list of checks.
+    family: str = "A"
+    # The transactions that drove this verdict, and the column of each that
+    # carries the cause. Empty where the merchant rather than any transaction
+    # is the subject.
+    contributions: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,11 @@ class DayData:
     hours: list[float]
     origins: list[str]
     foreign_ratio: float | None
+    # (source_txn_id, amount, hour, issuing country) per transaction, so a
+    # detector can name the rows it fired on. Optional and defaulted, because
+    # an alert written before this existed still has to render — it falls back
+    # to the evidence frozen on the alert row.
+    records: tuple[tuple[str, float, float, str | None], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +147,7 @@ def study_merchant(
         band: str | None,
         feature: str,
         msg: str,
+        contributions: tuple = (),
     ) -> None:
         nonlocal n
         n += 1
@@ -149,7 +163,28 @@ def study_merchant(
                 band=band,
                 feature_name=feature,
                 message=msg,
+                family="A",
+                contributions=contributions,
             )
+        )
+
+    def _cite(matching, field: str, reason: str) -> tuple:
+        """Name the transactions a detector fired on, and the column that says
+        why. Empty when the day's records were not supplied, in which case the
+        evidence frozen on the alert is used instead."""
+        formatted = {
+            "total_amount": lambda r: f"HKD {r[1]:,.2f}",
+            "occurred_at": lambda r: _fmt_hour(r[2]),
+            "card_issuing_country": lambda r: r[3] or "unknown",
+        }[field]
+        return tuple(
+            {
+                "source_txn_id": r[0],
+                "field": field,
+                "value": formatted(r),
+                "reason": reason,
+            }
+            for r in matching
         )
 
     # Shorthand
@@ -207,6 +242,15 @@ def study_merchant(
                     round(worst.deviation, 2), worst.band,
                     "ticket_amount",
                     f"{breaches} transaction(s) outlier vs own baseline",
+                    _cite(
+                        [
+                            r for r in day.records
+                            if score_value(r[1], baseline).is_outlier
+                        ],
+                        "total_amount",
+                        f"far above this merchant's typical transaction "
+                        f"({baseline.center:,.0f})",
+                    ),
                 )
 
     # ── 2. count_vs_own_baseline ────────────────────────────────────────────
@@ -317,6 +361,12 @@ def study_merchant(
                 "transaction_hour",
                 f"Transaction at {_fmt_hour(worst_hour)} is outside "
                 f"own trading pattern (peak: {_fmt_hour(hours.peak_hour())})",
+                _cite(
+                    [r for r in day.records if time_is_unusual(r[2], hours)],
+                    "occurred_at",
+                    f"outside this merchant's trading pattern "
+                    f"(usual peak {_fmt_hour(hours.peak_hour())})",
+                ),
             )
         else:
             _add(
@@ -359,6 +409,18 @@ def study_merchant(
                     f"Card origin {origin} at {today_share:.0%} is "
                     f"unexpected (normal: {mix.share(origin):.0%}, "
                     f"surprisal: {surprisal:.1f} bits)",
+                    # Every transaction on a surprising origin, with the
+                    # issuing country named as the cause — so the ledger
+                    # highlights that cell and not merely the row.
+                    _cite(
+                        [
+                            r for r in day.records
+                            if r[3] in {o for o, _ in flagged}
+                        ],
+                        "card_issuing_country",
+                        f"issued in a country outside this merchant's "
+                        f"normal card mix",
+                    ),
                 )
             else:
                 _add(
@@ -551,6 +613,72 @@ def study_merchant(
 # ---------------------------------------------------------------------------
 
 
+def study_typologies(
+    data, rules, *, start_rank: int = 0
+) -> list[DetectorResult]:
+    """Family B verdicts in the same shape as the Family A ones.
+
+    Every configured rule is reported, including the ones that did not fire.
+    A rule that stayed silent is information — it tells the analyst that
+    structuring was checked for and not found, which is the difference between
+    evidence of absence and nobody having looked.
+    """
+    from compliance.detection.ruleset import Family
+    from compliance.detection.typology import evaluate as evaluate_typologies
+
+    fired = {h.rule_id: h for h in evaluate_typologies(data, rules)}
+    results: list[DetectorResult] = []
+    n = start_rank
+
+    for inst in rules:
+        if inst.spec().family is not Family.B or not inst.enabled:
+            continue
+        n += 1
+        hit = fired.get(inst.instance_id)
+        if hit is None:
+            skipped = not inst.applies_to(data.mcc)
+            results.append(
+                DetectorResult(
+                    rank=n,
+                    detector=inst.template,
+                    label=inst.display_label(),
+                    status="SKIP" if skipped else "OK",
+                    merchant_value=None,
+                    baseline_value=None,
+                    deviation=None,
+                    band=None,
+                    feature_name=inst.template,
+                    message=(
+                        f"Not applicable — this rule is scoped to MCC "
+                        f"{', '.join(inst.mcc_scope)}"
+                        if skipped
+                        else "No match on the scored day"
+                    ),
+                    family="B",
+                )
+            )
+            continue
+
+        feature = hit.feature or {}
+        results.append(
+            DetectorResult(
+                rank=n,
+                detector=inst.template,
+                label=hit.label,
+                status="FAIL",
+                merchant_value=feature.get("merchant_value"),
+                baseline_value=feature.get("baseline_value"),
+                deviation=feature.get("deviation"),
+                band="outlier",
+                feature_name=feature.get("feature_name", inst.template),
+                message=hit.message,
+                family="B",
+                contributions=tuple(c.as_dict() for c in hit.contributions),
+            )
+        )
+    return results
+
+
 def root_cause(results: list[DetectorResult]) -> str | None:
     """Return a plain-English root-cause string, or None if all passed."""
     for r in results:
@@ -580,6 +708,7 @@ def fetch_day_data(
                 Transaction.total_amount,
                 Transaction.occurred_at,
                 Transaction.card_issuing_country,
+                Transaction.source_txn_id,
             ).where(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= _day_start,
@@ -591,6 +720,9 @@ def fetch_day_data(
     amounts = [r[0] for r in rows]
     hours = [local_time_of_day(r[1]) for r in rows]
     origins = [r[2] for r in rows if r[2] is not None]
+    records = tuple(
+        (r[3], r[0], local_time_of_day(r[1]), r[2]) for r in rows
+    )
 
     # Peak hourly rate (reuse the same window as the pipeline)
     from compliance.detection.windows import _peak_rate
@@ -608,6 +740,7 @@ def fetch_day_data(
         hours=hours,
         origins=origins,
         foreign_ratio=foreign_ratio,
+        records=records,
     )
 
 

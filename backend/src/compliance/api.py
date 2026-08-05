@@ -8,8 +8,10 @@ from datetime import date as _date
 
 from compliance import cases as case_svc
 from compliance import diagnostics as diag
+from compliance import rules_store
 from compliance import settings_store
 from compliance import glossary
+from compliance.detection import ruleset
 from compliance.schemas import (
     AlertOut,
     AlertPage,
@@ -24,6 +26,7 @@ from compliance.schemas import (
     BaselineOverview,
     BaselineRow,
     Glossary,
+    RuleSet,
 )
 
 
@@ -303,6 +306,49 @@ def create_app() -> FastAPI:
         settings_store.save_settings(session, settings)
         session.commit()
         return {"current": settings.as_dict(), "defaults": known}
+
+    @app.get("/api/rules", response_model=RuleSet)
+    def read_rules(session: Session = Depends(get_session)) -> RuleSet:
+        """The Family B and C rule set, with the catalogue behind it.
+
+        The templates ship alongside the instances so the tuning screen renders
+        its controls from the backend's declaration rather than a duplicated
+        list in the frontend — a rule cannot then gain a parameter that the UI
+        has no way to reach.
+        """
+        return RuleSet(
+            templates=[
+                ruleset.template_as_dict(t) for t in ruleset.TEMPLATES
+            ],
+            instances=[i.as_dict() for i in rules_store.load_rules(session)],
+        )
+
+    @app.put("/api/rules", response_model=RuleSet)
+    def write_rules(payload: dict, session: Session = Depends(get_session)) -> RuleSet:
+        """Replace the rule set.
+
+        Takes effect on the next pipeline run. Rejected as a whole if any
+        instance is invalid: a partial save would leave the officer believing
+        they had configured something they had not.
+        """
+        try:
+            instances = [
+                ruleset.RuleInstance.from_dict(raw)
+                for raw in (payload.get("instances") or [])
+            ]
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        problems = rules_store.validate(instances)
+        if problems:
+            raise HTTPException(status_code=422, detail="; ".join(problems))
+
+        rules_store.save_rules(session, instances)
+        session.commit()
+        return RuleSet(
+            templates=[ruleset.template_as_dict(t) for t in ruleset.TEMPLATES],
+            instances=[i.as_dict() for i in instances],
+        )
 
     @app.get("/api/alerts/{alert_id}", response_model=AlertOut)
     def get_alert(alert_id: int, session: Session = Depends(get_session)) -> AlertOut:

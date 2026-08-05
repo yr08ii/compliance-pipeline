@@ -4,26 +4,37 @@ from fastapi.testclient import TestClient
 
 from compliance import glossary
 from compliance.api import create_app
+from compliance.detection import ruleset
 from compliance.pipeline import stages
+
+
+def live_detectors() -> set[str]:
+    """Every identifier that can end up in `triggering_detectors`.
+
+    Two sources, because the three families are declared differently. Family A
+    baselines are module constants in `stages`; Family B and C rules are
+    templates in the rule catalogue, since their parameters have to be data for
+    the tuning screen to reach them. Both reach an analyst's screen, so both
+    are held to the same labelling rule.
+    """
+    baselines = {
+        value for name, value in vars(stages).items()
+        if name.endswith("_DETECTOR") and isinstance(value, str)
+    }
+    return baselines | {t.key for t in ruleset.TEMPLATES}
 
 
 def test_every_live_detector_has_a_label():
     """A detector shipping without a label would surface its raw identifier in
     the queue, which is the thing this exists to prevent."""
-    live = {
-        value for name, value in vars(stages).items()
-        if name.endswith("_DETECTOR") and isinstance(value, str)
-    }
+    live = live_detectors()
     labelled = {t.key for t in glossary.DETECTORS}
 
     assert live - labelled == set(), f"detectors with no plain-English label: {live - labelled}"
 
 
 def test_no_labels_for_detectors_that_no_longer_exist():
-    live = {
-        value for name, value in vars(stages).items()
-        if name.endswith("_DETECTOR") and isinstance(value, str)
-    }
+    live = live_detectors()
     labelled = {t.key for t in glossary.DETECTORS}
 
     assert labelled - live == set(), f"labels for removed detectors: {labelled - live}"
@@ -75,7 +86,15 @@ def test_every_feature_name_emitted_by_a_detector_has_a_label():
     import re
     from pathlib import Path
 
-    source = Path(stages.__file__).read_text()
+    from compliance.detection import rings, typology
+
+    # All three families emit feature rows into the same divergence panel, so
+    # all three are scanned. Scoping this to `stages` alone let Family B and C
+    # ship feature names with no translation.
+    source = "\n".join(
+        Path(module.__file__).read_text()
+        for module in (stages, typology, rings)
+    )
     emitted = set(re.findall(r'"feature_name":\s*"([a-z_0-9]+)"', source))
     labelled = {t.key for t in glossary.FEATURES}
     # Per-rail feature names are generated (amount_on_visa, amount_on_octopus,

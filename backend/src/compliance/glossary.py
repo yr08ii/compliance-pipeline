@@ -114,6 +114,96 @@ DETECTORS: tuple[Term, ...] = (
         "in the same district.",
         "Subdistrict peer group",
     ),
+    # ---- Family B: typology rules. These match a pattern rather than measure
+    # a deviation, so "compared against" names the rule's own threshold.
+    Term(
+        "structuring_below_threshold",
+        "Structuring below a reporting threshold",
+        "Several transactions in one day sitting just under a reporting threshold, at a "
+        "merchant whose normal transaction is nowhere near it. No single transaction is "
+        "unusual — the clustering is.",
+        "Reporting threshold",
+    ),
+    Term(
+        "refund_ratio_spike",
+        "Refund / credit abuse",
+        "An unusually high share of the day's value refunded. Refunds move value back out "
+        "with far less scrutiny than a payout.",
+        "Rule threshold",
+    ),
+    Term(
+        "bust_out",
+        "Bust-out pattern",
+        "A quiet history, then a sharp climb in daily value, then refunds — a merchant "
+        "maximising takings before disappearing. Each phase alone is ordinary.",
+        "Own history",
+    ),
+    Term(
+        "dormant_reactivation",
+        "Dormant account reactivation",
+        "A merchant silent for a long stretch that returns with immediate volume rather "
+        "than easing in. Genuine reactivation ramps; a takeover starts at full speed.",
+        "Own history",
+    ),
+    Term(
+        "rapid_movement",
+        "Rapid movement / pass-through",
+        "Value arriving and leaving the same day at near-parity, leaving no resting "
+        "balance. Read from transactions only — a settlement view would be stronger.",
+        "Rule threshold",
+    ),
+    Term(
+        "declared_vs_actual_mismatch",
+        "Declared vs actual business mismatch",
+        "The registered category does not match how the merchant actually trades, on both "
+        "ticket size and operating hours — the transaction-laundering signature.",
+        "MCC peer group",
+    ),
+    Term(
+        "decline_ratio_spike",
+        "Declined authorisation spike",
+        "An unusually high share of failed authorisations. This is the merchant-side read "
+        "of card testing; we measure the merchant's decline rate, not stolen cards.",
+        "Rule threshold",
+    ),
+    # ---- Family C: ring detection. Portfolio-wide, so these compare a
+    # merchant against other merchants rather than against any baseline.
+    Term(
+        "shared_identity_ring",
+        "Shared merchant identity",
+        "Several distinct merchant IDs sharing a business registration, address, or "
+        "trading name — the shell-merchant ring.",
+        "Other merchants",
+    ),
+    Term(
+        "agent_alert_concentration",
+        "Onboarding agent concentration",
+        "The agent who onboarded this merchant has a book that alerts far more often than "
+        "the portfolio as a whole.",
+        "Portfolio",
+    ),
+    Term(
+        "card_across_related_merchants",
+        "One card across related merchants",
+        "A single card used at more merchants under common ownership in one day than a "
+        "customer plausibly would.",
+        "Other merchants",
+    ),
+    Term(
+        "card_swarm",
+        "Card swarming across merchants",
+        "One card appearing at many unrelated merchants inside a short window — a ring "
+        "moving through an area.",
+        "Other merchants",
+    ),
+    Term(
+        "impossible_geo_velocity",
+        "Impossible travel between merchants",
+        "One card used at two places further apart than the time between the transactions "
+        "allows. Distances are between subdistrict centroids, so the implied speed is a "
+        "lower bound.",
+        "Other merchants",
+    ),
 )
 
 
@@ -141,6 +231,39 @@ FEATURES: tuple[Term, ...] = (
     Term("amount_on_visa", "Transaction amount (Visa)", "Value of a Visa transaction.", ""),
     Term("foreign_card_share_vs_district", "Overseas card share",
          "The share of transactions on cards issued outside Hong Kong.", ""),
+    # ---- Family B
+    Term("near_threshold_transaction_count", "Transactions just under the threshold",
+         "How many of the day's transactions sat inside the band just below the "
+         "reporting threshold.", ""),
+    Term("refund_value_share", "Refunded share of the day",
+         "Value refunded divided by value taken, on the scored day.", ""),
+    Term("recent_vs_earlier_daily_value", "Recent daily value vs earlier",
+         "Median daily value over the recent window, against the level before it.", ""),
+    Term("days_dormant_before_return", "Days dormant before returning",
+         "How long the merchant was inactive before the scored day.", ""),
+    Term("same_day_in_out_mismatch", "Gap between value in and value out",
+         "How far the day's refunds differ from the day's takings. Near zero means "
+         "nothing was left behind.", ""),
+    Term("declared_category_divergence", "Divergence from declared MCC",
+         "How many times its MCC cohort's typical transaction this merchant's own is.", ""),
+    Term("declined_authorisation_share", "Declined share of authorisations",
+         "Declined authorisations divided by all attempts on the scored day.", ""),
+    # ---- Family C
+    Term("merchants_sharing_hashed_br_number", "Merchants sharing a registration",
+         "How many merchant IDs share this business registration number.", ""),
+    Term("merchants_sharing_hashed_merchant_address", "Merchants sharing an address",
+         "How many merchant IDs share this registered address.", ""),
+    Term("merchants_sharing_hashed_merchant_name", "Merchants sharing a name",
+         "How many merchant IDs share this trading name.", ""),
+    Term("agent_book_alert_rate", "Agent's book alert rate",
+         "The share of this onboarding agent's merchants currently carrying an alert.", ""),
+    Term("related_merchants_per_card_per_day", "Related merchants per card per day",
+         "How many commonly-owned merchants one card was used at in a single day.", ""),
+    Term("unrelated_merchants_per_card_window", "Unrelated merchants per card",
+         "How many merchants with no ownership link one card touched inside the window.", ""),
+    Term("implied_travel_speed_kmh", "Implied travel speed",
+         "Distance between the two merchants divided by the time between the "
+         "transactions, in km/h.", ""),
 )
 
 
@@ -180,6 +303,16 @@ ALERT_TYPES: tuple[Term, ...] = (
          "Amounts or card origins diverge from the local area baseline.", ""),
     Term("temporal_anomaly", "Temporal anomaly",
          "Transactions fell outside established operating hours.", ""),
+    # Family B and C get their own badges rather than being folded into the
+    # Family A four. A typology match and a statistical outlier call for
+    # completely different follow-up, and a queue that shows them as the same
+    # kind of thing makes an analyst open each one to find out which it is.
+    Term("typology_match", "Typology match",
+         "The day's activity matches a known laundering pattern. Individual "
+         "transactions may each look ordinary — the shape is the signal.", ""),
+    Term("ring_signal", "Ring signal",
+         "This merchant is linked to others: shared identity, a shared "
+         "onboarding agent, or a card connecting them.", ""),
 )
 
 # Which badge each detector belongs to. Deliberately exhaustive: a detector
@@ -198,6 +331,20 @@ DETECTOR_ALERT_TYPE: dict[str, str] = {
     "hour_vs_mcc_peers": "temporal_anomaly",
     "ticket_vs_subdistrict_peers": "subdistrict_anomaly",
     "foreign_card_ratio_vs_subdistrict": "subdistrict_anomaly",
+    # Family B — every typology rule.
+    "structuring_below_threshold": "typology_match",
+    "refund_ratio_spike": "typology_match",
+    "bust_out": "typology_match",
+    "dormant_reactivation": "typology_match",
+    "rapid_movement": "typology_match",
+    "declared_vs_actual_mismatch": "typology_match",
+    "decline_ratio_spike": "typology_match",
+    # Family C — every ring rule.
+    "shared_identity_ring": "ring_signal",
+    "agent_alert_concentration": "ring_signal",
+    "card_across_related_merchants": "ring_signal",
+    "card_swarm": "ring_signal",
+    "impossible_geo_velocity": "ring_signal",
 }
 
 

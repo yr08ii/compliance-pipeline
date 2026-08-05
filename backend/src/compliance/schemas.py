@@ -2,9 +2,29 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class TxnContribution(BaseModel):
+    """One transaction's part in one detector firing.
+
+    `field` names the source column that carries the cause, so the ledger can
+    highlight that cell rather than leaving the analyst to guess which
+    property of a highlighted row was the problem."""
+
+    source_txn_id: str
+    field: str
+    value: str
+    reason: str
+
+
 class DetectorHit(BaseModel):
     detector: str
     sub_score: float
+    # Set for Family B and C, whose findings are rule matches. `reason_code`
+    # carries the parameters in force when it fired, so it still explains
+    # itself after the rule is retuned.
+    rule_id: str | None = None
+    reason_code: str | None = None
+    message: str | None = None
+    contributions: list[TxnContribution] = []
 
 
 class FeatureDivergence(BaseModel):
@@ -137,6 +157,10 @@ class DetectorVerdict(BaseModel):
     deviation: float | None
     band: str | None
     message: str
+    # "A" robust baselines, "B" typology rules, "C" ring detection. The panel
+    # groups by this because the three call for different follow-up.
+    family: str = "A"
+    contributions: list[TxnContribution] = []
 
 
 class StatBlock(BaseModel):
@@ -265,6 +289,49 @@ class CaseDetail(CaseSummary):
     analyst_id: str
     scored_date: str | None
     events: list[CaseEventOut]
+
+
+class RuleParam(BaseModel):
+    """One tunable number on a rule, with the bounds it must stay inside."""
+
+    key: str
+    label: str
+    kind: str
+    default: float
+    minimum: float
+    maximum: float
+    step: float
+    hint: str
+
+
+class RuleTemplateOut(BaseModel):
+    """A rule the engine can evaluate, and everything the tuning screen needs
+    to render controls for it without hard-coding anything."""
+
+    key: str
+    family: str
+    label: str
+    description: str
+    rationale: str
+    scopable: bool
+    params: list[RuleParam]
+
+
+class RuleInstanceIn(BaseModel):
+    instance_id: str = Field(min_length=1)
+    template: str = Field(min_length=1)
+    enabled: bool = True
+    params: dict[str, float] = {}
+    mcc_scope: list[str] = []
+    custom: bool = False
+    label: str | None = None
+
+
+class RuleSet(BaseModel):
+    """The configured rules, alongside the catalogue they instantiate."""
+
+    templates: list[RuleTemplateOut]
+    instances: list[RuleInstanceIn]
 
 
 class Page(BaseModel):
