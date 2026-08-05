@@ -457,6 +457,15 @@ def study_merchant(
             "Transaction outlier vs MCC peers"
             if worst.is_outlier
             else "Transactions within MCC peer range",
+            _cite(
+                [
+                    r for r in day.records
+                    if score_value(r[1], cohort_txn).is_outlier
+                ],
+                "total_amount",
+                f"above what this trade normally takes "
+                f"(typical {cohort_txn.center:,.0f})",
+            ) if worst.is_outlier else (),
         )
 
     # ── 8. merchant_level_vs_mcc_peers ──────────────────────────────────────
@@ -479,6 +488,9 @@ def study_merchant(
         )
         peer_score = score_value(m["baseline_center"], cohort)
         status = "FAIL" if peer_score.is_outlier else "OK"
+        # No contributions by design: this compares the merchant's whole level
+        # against its cohort, so no individual transaction is the reason and
+        # highlighting any would misattribute the finding.
         _add(
             "merchant_level_vs_mcc_peers", status,
             m["baseline_center"], cohort.center,
@@ -577,6 +589,15 @@ def study_merchant(
             "Transaction outlier vs district peers"
             if worst_d.is_outlier
             else "Transactions within district peer range",
+            _cite(
+                [
+                    r for r in day.records
+                    if score_value(r[1], dist_base).is_outlier
+                ],
+                "total_amount",
+                f"above what merchants in this district normally take "
+                f"(typical {dist_base.center:,.0f})",
+            ) if worst_d.is_outlier else (),
         )
 
     # ── 12. foreign_card_ratio_vs_subdistrict ───────────────────────────────

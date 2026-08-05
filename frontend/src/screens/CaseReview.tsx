@@ -4,6 +4,7 @@ import {
   apiGet,
   type AlertOut,
   type Diagnostics,
+  type DetectorVerdict,
   type Ledger,
 } from "../api/client";
 import { useGlossary } from "../api/glossary";
@@ -87,6 +88,57 @@ const AMOUNT_INDICATORS = [
 const PEER_LEVEL_INDICATORS = ["merchant_level_vs_mcc_peers", "ticket_vs_mcc_peers"];
 const TIMING_INDICATORS = ["hour_vs_own_pattern", "hour_vs_mcc_peers"];
 
+/** Which ledger column each source field maps to, so the cell that carries
+ *  the cause can be marked rather than the whole row. A high-amount alert and
+ *  an unusual-origin alert can implicate the same transaction for completely
+ *  different reasons, and the row alone cannot say which. */
+const FIELD_COLUMN: Record<string, string> = {
+  total_amount: "amount",
+  net_amount: "amount",
+  occurred_at: "time",
+  card_issuing_country: "country",
+  card_type: "card",
+  transaction_status: "status",
+  merchant_id: "id",
+};
+
+const FAMILY_LABEL: Record<string, string> = {
+  A: "Baseline",
+  B: "Typology rule",
+  C: "Ring signal",
+};
+
+/** The cause attached to one transaction by the indicator in focus. */
+type Cause = { field: string; column: string; reason: string };
+
+/** Index the diagnostics' contributions by transaction, for the indicators
+ *  currently in focus. The ledger then colours a row only when the indicator
+ *  the analyst is actually looking at implicated it — highlighting every row
+ *  every detector ever touched would be no highlighting at all. */
+function causesByTxn(
+  detectors: DetectorVerdict[],
+  inFocus: (detector: string) => boolean
+): Map<string, Cause[]> {
+  const out = new Map<string, Cause[]>();
+  for (const d of detectors) {
+    if (d.status !== "FAIL" || !inFocus(d.detector)) continue;
+    for (const c of d.contributions ?? []) {
+      const existing = out.get(c.source_txn_id) ?? [];
+      // One transaction can be implicated by several indicators at once; keep
+      // each distinct reason so the tooltip explains all of them.
+      if (!existing.some((e) => e.field === c.field && e.reason === c.reason)) {
+        existing.push({
+          field: c.field,
+          column: FIELD_COLUMN[c.field] ?? "",
+          reason: c.reason,
+        });
+      }
+      out.set(c.source_txn_id, existing);
+    }
+  }
+  return out;
+}
+
 export default function CaseReview() {
   const g = useGlossary();
   const { id } = useParams();
@@ -150,6 +202,10 @@ export default function CaseReview() {
     focus === "all"
       ? diag?.detectors ?? []
       : (diag?.detectors ?? []).filter((d) => inFocus(d.detector));
+
+  // The transactions the in-focus indicators actually named, and the column of
+  // each that carries the cause.
+  const implicated = causesByTxn(diag?.detectors ?? [], inFocus);
 
   const TABS: [TabKey, string, string][] = [
     ["why", "Why it fired", "The checks that ran, and what each concluded."],
@@ -324,10 +380,23 @@ export default function CaseReview() {
                             raised this alert
                           </span>
                         )}
+                        {/* A typology match and a statistical outlier call for
+                            different follow-up, so the family is named rather
+                            than left for the analyst to infer. */}
+                        <span className="ml-2 rounded-full border border-[var(--border-strong)] px-2 py-0.5 text-[0.68rem] font-medium text-[var(--muted)]">
+                          {FAMILY_LABEL[d.family] ?? d.family}
+                        </span>
                       </p>
                       <p className="mt-0.5 text-[0.82rem] leading-5 text-[var(--muted)]">
                         {d.message}
                       </p>
+                      {d.status === "FAIL" && (d.contributions?.length ?? 0) > 0 && (
+                        <p className="mt-1 text-[0.78rem] text-[var(--muted)]">
+                          {d.contributions.length} transaction
+                          {d.contributions.length === 1 ? "" : "s"} implicated —
+                          see the Transactions tab.
+                        </p>
+                      )}
                     </td>
                     <td className="px-5 py-3 text-[var(--muted)]">{d.compared_against}</td>
                     <td className="px-5 py-3 text-right metric-number">{num(d.merchant_value)}</td>
@@ -371,12 +440,27 @@ export default function CaseReview() {
           ) : (
             <>
             <p className="border-b border-[var(--border)] px-5 py-3 text-[0.86rem] leading-6 text-[var(--muted)]">
-              Highlighted rows exceeded this merchant&rsquo;s own amount threshold —
-              the transactions that drove{" "}
-              {focus === "all" ? "the amount indicators" : g.detector(focus === "firing" ? firingDetector : focus)}.
-              Indicators judged on count, timing or card origin have no single driving
-              transaction; the whole day is the evidence.
+              {implicated.size > 0 ? (
+                <>
+                  <strong className="text-[var(--text-strong)]">
+                    {implicated.size} of {ledger.count} transactions
+                  </strong>{" "}
+                  contributed to{" "}
+                  {focus === "all"
+                    ? "the indicators that fired"
+                    : g.detector(focus === "firing" ? firingDetector : focus)}
+                  . The highlighted cell in each row is the value that implicated
+                  it — hover it for the reason.
+                </>
+              ) : (
+                <>
+                  No individual transaction drove this indicator. It is judged on
+                  the merchant rather than on any one checkout, so the whole day is
+                  the evidence.
+                </>
+              )}
             </p>
+            <div className="overflow-x-auto">
             <table className="w-full text-left text-[0.86rem]">
               <thead className="border-b border-[var(--border)] text-[0.7rem] uppercase tracking-[0.12em] text-[var(--muted)]">
                 <tr>
@@ -389,51 +473,82 @@ export default function CaseReview() {
                 </tr>
               </thead>
               <tbody>
-                {ledger.transactions.map((t) => (
-                  <tr
-                    key={t.source_txn_id}
-                    className={cn(
-                      "border-b border-[var(--border)] last:border-b-0",
-                      t.is_outlier && "bg-[var(--danger-bg)]/50"
-                    )}
-                  >
-                    <td className="px-5 py-2.5 metric-number">
-                      {new Date(t.occurred_at).toLocaleTimeString("en-GB", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        timeZone: "Asia/Hong_Kong",
-                      })}
-                    </td>
-                    <td className="px-5 py-2.5 text-right">
-                      <span
-                        className={cn(
-                          "metric-number",
-                          t.is_outlier && "font-semibold text-[var(--danger)]"
-                        )}
-                      >
-                        {num(t.total_amount)}
-                      </span>
-                      {t.is_refund && (
-                        <span className="ml-2 text-[0.72rem] text-[var(--muted)]">refund</span>
+                {ledger.transactions.map((t) => {
+                  const causes = implicated.get(t.source_txn_id) ?? [];
+                  const marks = new Set(causes.map((c) => c.column));
+                  const why = causes.map((c) => c.reason).join(" · ");
+                  // One shared cell treatment, so "this is the reason" reads
+                  // the same whichever column carries it.
+                  const cell = (column: string) =>
+                    marks.has(column)
+                      ? "rounded bg-[var(--danger-bg)] font-semibold text-[var(--danger)] ring-1 ring-[var(--danger)]/30"
+                      : "";
+                  return (
+                    <tr
+                      key={t.source_txn_id}
+                      title={why || undefined}
+                      className={cn(
+                        "border-b border-[var(--border)] last:border-b-0",
+                        causes.length > 0 && "bg-[var(--danger-bg)]/30"
                       )}
-                      {t.is_outlier && (
-                        <span className="ml-2 text-[0.72rem] font-semibold text-[var(--danger)]">
-                          outlier
+                    >
+                      <td className="px-5 py-2.5">
+                        <span className={cn("metric-number px-1", cell("time"))}>
+                          {new Date(t.occurred_at).toLocaleTimeString("en-GB", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            timeZone: "Asia/Hong_Kong",
+                          })}
                         </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-2.5 text-[var(--muted)]">{t.card_type ?? "—"}</td>
-                    <td className="px-5 py-2.5">{t.card_issuing_country ?? "—"}</td>
-                    <td className="px-5 py-2.5 text-[var(--muted)]">
-                      {t.transaction_status ?? "—"}
-                    </td>
-                    <td className="px-5 py-2.5">
-                      <code className="text-[0.76rem] text-[var(--muted)]">{t.source_txn_id}</code>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-5 py-2.5 text-right">
+                        <span className={cn("metric-number px-1", cell("amount"))}>
+                          {num(t.total_amount)}
+                        </span>
+                        {t.is_refund && (
+                          <span className="ml-2 text-[0.72rem] text-[var(--muted)]">
+                            refund
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-2.5 text-[var(--muted)]">
+                        <span className={cn("px-1", cell("card"))}>
+                          {t.card_type ?? "—"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-2.5">
+                        <span className={cn("px-1", cell("country"))}>
+                          {t.card_issuing_country ?? "—"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-2.5 text-[var(--muted)]">
+                        <span className={cn("px-1", cell("status"))}>
+                          {t.transaction_status ?? "—"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-2.5">
+                        <code className="text-[0.76rem] text-[var(--muted)]">
+                          {t.source_txn_id}
+                        </code>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
+            </div>
+            {implicated.size > 0 && (
+              <ul className="border-t border-[var(--border)] px-5 py-3 text-[0.82rem] leading-6 text-[var(--muted)]">
+                {[...new Set(
+                  [...implicated.values()].flat().map((c) => c.reason)
+                )].map((reason) => (
+                  <li key={reason}>
+                    <span className="mr-2 inline-block h-2 w-2 rounded-sm bg-[var(--danger)]/60 align-middle" />
+                    {reason}
+                  </li>
+                ))}
+              </ul>
+            )}
             </>
           )}
         </Card>

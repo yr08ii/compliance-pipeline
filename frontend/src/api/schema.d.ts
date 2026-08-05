@@ -226,6 +226,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Rules
+         * @description The Family B and C rule set, with the catalogue behind it.
+         *
+         *     The templates ship alongside the instances so the tuning screen renders
+         *     its controls from the backend's declaration rather than a duplicated
+         *     list in the frontend — a rule cannot then gain a parameter that the UI
+         *     has no way to reach.
+         */
+        get: operations["read_rules_api_rules_get"];
+        /**
+         * Write Rules
+         * @description Replace the rule set.
+         *
+         *     Takes effect on the next pipeline run. Rejected as a whole if any
+         *     instance is invalid: a partial save would leave the officer believing
+         *     they had configured something they had not.
+         */
+        put: operations["write_rules_api_rules_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/{alert_id}": {
         parameters: {
             query?: never;
@@ -547,6 +580,17 @@ export interface components {
             detector: string;
             /** Sub Score */
             sub_score: number;
+            /** Rule Id */
+            rule_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Message */
+            message?: string | null;
+            /**
+             * Contributions
+             * @default []
+             */
+            contributions: components["schemas"]["TxnContribution"][];
         };
         /**
          * DetectorVerdict
@@ -576,6 +620,16 @@ export interface components {
             band: string | null;
             /** Message */
             message: string;
+            /**
+             * Family
+             * @default A
+             */
+            family: string;
+            /**
+             * Contributions
+             * @default []
+             */
+            contributions: components["schemas"]["TxnContribution"][];
         };
         /** Diagnostics */
         Diagnostics: {
@@ -773,6 +827,90 @@ export interface components {
             /** Peer Values */
             peer_values: number[];
         };
+        /** RuleInstanceIn */
+        RuleInstanceIn: {
+            /** Instance Id */
+            instance_id: string;
+            /** Template */
+            template: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Params
+             * @default {}
+             */
+            params: {
+                [key: string]: number;
+            };
+            /**
+             * Mcc Scope
+             * @default []
+             */
+            mcc_scope: string[];
+            /**
+             * Custom
+             * @default false
+             */
+            custom: boolean;
+            /** Label */
+            label?: string | null;
+        };
+        /**
+         * RuleParam
+         * @description One tunable number on a rule, with the bounds it must stay inside.
+         */
+        RuleParam: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Kind */
+            kind: string;
+            /** Default */
+            default: number;
+            /** Minimum */
+            minimum: number;
+            /** Maximum */
+            maximum: number;
+            /** Step */
+            step: number;
+            /** Hint */
+            hint: string;
+        };
+        /**
+         * RuleSet
+         * @description The configured rules, alongside the catalogue they instantiate.
+         */
+        RuleSet: {
+            /** Templates */
+            templates: components["schemas"]["RuleTemplateOut"][];
+            /** Instances */
+            instances: components["schemas"]["RuleInstanceIn"][];
+        };
+        /**
+         * RuleTemplateOut
+         * @description A rule the engine can evaluate, and everything the tuning screen needs
+         *     to render controls for it without hard-coding anything.
+         */
+        RuleTemplateOut: {
+            /** Key */
+            key: string;
+            /** Family */
+            family: string;
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Rationale */
+            rationale: string;
+            /** Scopable */
+            scopable: boolean;
+            /** Params */
+            params: components["schemas"]["RuleParam"][];
+        };
         /** StatBlock */
         StatBlock: {
             /** Mean */
@@ -793,6 +931,24 @@ export interface components {
             modified_z: number | null;
             /** Method */
             method: string;
+        };
+        /**
+         * TxnContribution
+         * @description One transaction's part in one detector firing.
+         *
+         *     `field` names the source column that carries the cause, so the ledger can
+         *     highlight that cell rather than leaving the analyst to guess which
+         *     property of a highlighted row was the problem.
+         */
+        TxnContribution: {
+            /** Source Txn Id */
+            source_txn_id: string;
+            /** Field */
+            field: string;
+            /** Value */
+            value: string;
+            /** Reason */
+            reason: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -1113,6 +1269,61 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_rules_api_rules_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleSet"];
+                };
+            };
+        };
+    };
+    write_rules_api_rules_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleSet"];
                 };
             };
             /** @description Validation Error */
