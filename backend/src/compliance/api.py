@@ -190,6 +190,66 @@ def create_app() -> FastAPI:
             for r in runs
         ]
 
+    @app.delete("/api/runs/superseded")
+    def clear_superseded_runs(
+        as_of: str, session: Session = Depends(get_session)
+    ) -> dict:
+        """Discard the retired runs for one scored day.
+
+        Supersession keeps a re-scored day's earlier runs readable, which is
+        what makes a threshold change reviewable — but once the comparison has
+        been made they are just history, and this is how it gets cleared.
+
+        Only superseded runs: the run currently speaking for the day is what
+        the analysts are working, and clearing it from under them would empty
+        the queue. Decided alerts are kept whatever else goes, along with the
+        run that raised them — a disposition is a person's judgement, and it
+        also quarantines that merchant's day from future baselines, so
+        deleting it would quietly readmit confirmed-bad trade as normal.
+        """
+        try:
+            day = _date.fromisoformat(as_of)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="as_of must be YYYY-MM-DD")
+
+        runs = [
+            r
+            for r in session.scalars(
+                select(PipelineRun).where(PipelineRun.superseded_at.is_not(None))
+            )
+            if r.as_of.astimezone(diag.HKT).date() == day
+        ]
+        if not runs:
+            return {"runs_cleared": 0, "alerts_removed": 0, "alerts_kept": 0}
+
+        decided = select(Disposition.alert_id)
+        removed = kept = 0
+        cleared_runs = 0
+        for run in runs:
+            alerts = list(
+                session.scalars(select(Alert).where(Alert.run_id == run.id))
+            )
+            keep = set(session.scalars(decided))
+            for alert in alerts:
+                if alert.id in keep:
+                    kept += 1
+                else:
+                    session.delete(alert)
+                    removed += 1
+            session.flush()
+            # The run record goes only once nothing is left pointing at it.
+            if not session.scalars(
+                select(Alert).where(Alert.run_id == run.id)
+            ).first():
+                session.delete(run)
+                cleared_runs += 1
+        session.commit()
+        return {
+            "runs_cleared": cleared_runs,
+            "alerts_removed": removed,
+            "alerts_kept": kept,
+        }
+
     @app.get("/api/alerts", response_model=AlertPage)
     def list_alerts(
         page: int = 1,
