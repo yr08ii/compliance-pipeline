@@ -110,6 +110,49 @@ class CohortSnapshot(Base):
     )
 
 
+class PipelineRun(Base):
+    """One execution of the pipeline, and what it was told to do.
+
+    A run is a statement about a scored day made under a particular set of
+    parameters. Re-running the same day with a retuned threshold produces a
+    different statement about it, and without a record of which parameters were
+    in force there is no way to say why two runs disagreed — or even that they
+    were two runs, since both carry the same `as_of`.
+
+    The thresholds and rules are copied in rather than referenced. They live in
+    tables the compliance lead can edit without a deploy, so a reference would
+    resolve to whatever is current at reading time and quietly misattribute the
+    settings that actually produced the alerts.
+
+    `superseded_at` is what retires a run. Its alerts leave the queue but stay
+    on record: an analyst sees one current statement per scored day, and a
+    parameter change remains something you can look back at and compare rather
+    than something that overwrote its predecessor.
+    """
+
+    __tablename__ = "pipeline_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # The day scored. Not unique: re-scoring a day is the case this exists for.
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    # NULL means this is the current statement about its scored day.
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True, default=None
+    )
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    rules: Mapped[list] = mapped_column(JSON, default=list)
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Why this run was made — "outlier_z 3.5 -> 4.0", "post-tuning re-score".
+    # Free text, because the reason for a re-run is a human one.
+    label: Mapped[str | None] = mapped_column(String, default=None)
+    triggered_by: Mapped[str | None] = mapped_column(String, default=None)
+
+
 class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -120,6 +163,12 @@ class Alert(Base):
     # which day was evaluated, not when the row happened to be written.
     as_of: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True, default=None
+    )
+    # Which execution raised this. `as_of` says which day was scored; two runs
+    # over one day share it, so this is the only thing that attributes an alert
+    # to the parameters that produced it.
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipeline_runs.id"), index=True, default=None
     )
     lane: Mapped[str] = mapped_column(String)
     blended_score: Mapped[float] = mapped_column(Float)

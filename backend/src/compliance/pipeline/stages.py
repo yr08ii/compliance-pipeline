@@ -11,7 +11,7 @@ an audit requirement, not a preference.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import (
@@ -72,9 +72,12 @@ from compliance.models import (
     Disposition,
     Merchant,
     MerchantProfile,
+    PipelineRun,
     Transaction,
+    utcnow,
 )
 from compliance.pipeline.merchant_study import merchant_level_is_comparable
+from compliance import rules_store
 from compliance.rules_store import active_rules
 from compliance.settings_store import load_settings
 
@@ -1246,49 +1249,81 @@ def rings(
     ]
 
 
-def _clear_superseded_alerts(session: Session, as_of: datetime) -> int:
-    """Drop the undecided alerts a previous run raised for this same day.
+def open_run(
+    session: Session,
+    *,
+    as_of: datetime,
+    label: str | None = None,
+    triggered_by: str | None = None,
+) -> PipelineRun:
+    """Start a run, recording the parameters it will score under.
 
-    A run is the current statement about the day it scored, not an addition to
-    every statement made before it. Without this, re-running one scored day
-    stacked four runs' worth of near-identical alerts into one queue — 88,065
-    rows carrying about 7,000 distinct findings, with 99.6% of the last run's
-    merchant and alert-type pairs already present from the run before.
-
-    `as_of` alone cannot tell those runs apart, since they all scored the same
-    trading day. That is precisely why this is keyed on it: everything written
-    for this day is superseded by what is about to be written for it.
-
-    Decided alerts are kept. They record a judgement someone made, and a run
-    deleting them would erase who concluded what — the same reason a second
-    disposition on one alert is refused rather than overwritten.
+    Captured at the start rather than referenced later: thresholds and rules
+    live in tables the compliance lead can edit without a deploy, so a
+    reference would resolve to whatever is current when someone reads it and
+    attribute the wrong settings to the alerts this run is about to raise.
     """
-    undecided = ~select(Disposition.id).where(
-        Disposition.alert_id == Alert.id
-    ).exists()
+    run = PipelineRun(
+        as_of=as_of,
+        settings=load_settings(session).as_dict(),
+        rules=[r.as_dict() for r in rules_store.load_rules(session)],
+        label=label,
+        triggered_by=triggered_by,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def supersede_previous_runs(session: Session, *, as_of: datetime, keep: int) -> int:
+    """Retire the runs that previously spoke for this scored day.
+
+    Retiring, not deleting. Four runs over one day once stacked 88,065 alerts
+    into a queue carrying about 7,000 distinct findings, so only one run may
+    hold the queue at a time — but the superseded ones stay readable, because
+    the reason to re-score a day is usually that a parameter changed, and the
+    question that follows is what it changed.
+
+    Decided alerts are unaffected either way: a disposition is a judgement
+    someone made, and it stays in the queue's history whatever became of the
+    run that raised it.
+    """
     result = session.execute(
-        delete(Alert).where(Alert.as_of == as_of, undecided)
+        update(PipelineRun)
+        .where(
+            PipelineRun.as_of == as_of,
+            PipelineRun.id != keep,
+            PipelineRun.superseded_at.is_(None),
+        )
+        .values(superseded_at=utcnow())
     )
     session.flush()
     return result.rowcount or 0
 
 
 def score_and_rank(
-    session: Session, hits: list[dict], *, as_of: datetime | None = None
+    session: Session,
+    hits: list[dict],
+    *,
+    as_of: datetime | None = None,
+    run: PipelineRun | None = None,
 ) -> list[Alert]:
     """Stage 5: one alert per flagged merchant, ranked, with its snapshot.
 
-    Idempotent per scored day, as every other stage is: re-scoring a day
-    replaces that day's open queue rather than adding a second copy of it.
+    Every alert is stamped with the run that raised it, and that run becomes
+    the current statement about its scored day — the runs before it are
+    superseded, so the queue holds one statement rather than their sum.
 
     The feature snapshot is written once and never recomputed — training on
     features rebuilt later would leak the future into the model.
     """
-    # Only when the run names the day it scored. An unscoped run has no day to
-    # replace, and guessing at one is the single unrecoverable way to be wrong
-    # here, so it appends as before.
-    if as_of is not None:
-        _clear_superseded_alerts(session, as_of)
+    # A caller that named no day and opened no run is not making a statement
+    # about a scored day, so there is nothing to supersede and no run to
+    # attribute the alerts to.
+    if run is None and as_of is not None:
+        run = open_run(session, as_of=as_of, triggered_by="score_and_rank")
+    if run is not None:
+        supersede_previous_runs(session, as_of=run.as_of, keep=run.id)
 
     # Ties broken on merchant then detector so two runs over the same data
     # produce the same ranks. Sorting on score alone leaves equal-scoring hits
@@ -1320,6 +1355,7 @@ def score_and_rank(
         alert = Alert(
             merchant_id=h["merchant_id"],
             as_of=as_of,
+            run_id=run.id if run is not None else None,
             lane=h["lane"],
             blended_score=h["sub_score"],
             rank=rank,
@@ -1332,4 +1368,8 @@ def score_and_rank(
         )
         session.add(alert)
         alerts.append(alert)
+
+    if run is not None:
+        run.alert_count = len(alerts)
+        run.finished_at = utcnow()
     return alerts

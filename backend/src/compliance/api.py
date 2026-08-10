@@ -3,7 +3,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
-from compliance.models import Alert, Disposition, Merchant, MerchantProfile
+from compliance.models import (
+    Alert,
+    Disposition,
+    Merchant,
+    MerchantProfile,
+    PipelineRun,
+)
 from datetime import date as _date
 
 from compliance import cases as case_svc
@@ -28,6 +34,7 @@ from compliance.schemas import (
     BaselineRow,
     Glossary,
     RuleSet,
+    RunOut,
 )
 
 
@@ -135,11 +142,60 @@ def create_app() -> FastAPI:
             alert_type=diag.alert_type(alert),
         )
 
+    def _current_run_filter():
+        """Alerts belonging to a run that has not been superseded.
+
+        Two runs over one scored day both carry that day's `as_of`, so the
+        queue cannot be scoped by date. It is scoped by run: the latest run for
+        a day speaks for it, and a re-score under retuned parameters retires
+        its predecessor rather than piling on top of it.
+
+        Alerts predating the run record are treated as current. They were
+        written when there was one statement per day by construction, and
+        hiding them because they lack a run id would empty the queue.
+        """
+        return (
+            (Alert.run_id.is_(None))
+            | Alert.run_id.in_(
+                select(PipelineRun.id).where(PipelineRun.superseded_at.is_(None))
+            )
+        )
+
+    @app.get("/api/runs", response_model=list[RunOut])
+    def list_runs(session: Session = Depends(get_session)) -> list[RunOut]:
+        """Every pipeline run, newest first, with the parameters it scored under.
+
+        The point of comparison when a threshold changes: two runs over one day
+        are otherwise indistinguishable, since both carry the same `as_of`.
+        """
+        runs = list(
+            session.scalars(
+                select(PipelineRun).order_by(PipelineRun.started_at.desc())
+            )
+        )
+        return [
+            RunOut(
+                id=r.id,
+                as_of=r.as_of,
+                started_at=r.started_at,
+                finished_at=r.finished_at,
+                superseded_at=r.superseded_at,
+                is_current=r.superseded_at is None,
+                alert_count=r.alert_count,
+                label=r.label,
+                triggered_by=r.triggered_by,
+                settings=r.settings,
+                rules=r.rules,
+            )
+            for r in runs
+        ]
+
     @app.get("/api/alerts", response_model=AlertPage)
     def list_alerts(
         page: int = 1,
         page_size: int = 20,
         alert_type: str | None = None,
+        run_id: int | None = None,
         session: Session = Depends(get_session),
     ) -> AlertPage:
         """Alerts still awaiting a decision, newest risk first.
@@ -147,14 +203,26 @@ def create_app() -> FastAPI:
         Paginated because the queue runs to thousands: loading it whole made
         the screen unusable before the first row appeared. Decided alerts drop
         out — an analyst's queue should hold only what still needs them.
+
+        `run_id` switches the question being asked. Without it this is the
+        working queue: undecided alerts from whichever run currently speaks for
+        each scored day. With it, it is the full output of one named run,
+        decided rows included and superseded or not — because comparing what a
+        threshold change did to a day means seeing everything both runs raised,
+        not the remainder nobody has got to yet.
         """
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
 
-        undecided = ~select(Disposition.id).where(
-            Disposition.alert_id == Alert.id
-        ).exists()
-        conditions = [undecided]
+        conditions = []
+        if run_id is not None:
+            conditions.append(Alert.run_id == run_id)
+        else:
+            undecided = ~select(Disposition.id).where(
+                Disposition.alert_id == Alert.id
+            ).exists()
+            conditions.append(undecided)
+            conditions.append(_current_run_filter())
         if alert_type:
             conditions.append(Alert.alert_type == alert_type)
 
@@ -201,13 +269,16 @@ def create_app() -> FastAPI:
             key: count
             for key, count in session.execute(
                 select(Alert.alert_type, func.count())
-                .where(undecided)
+                .where(undecided, _current_run_filter())
                 .group_by(Alert.alert_type)
             )
             if key
         }
         first = session.scalars(
-            select(Alert).where(undecided).order_by(Alert.rank).limit(1)
+            select(Alert)
+            .where(undecided, _current_run_filter())
+            .order_by(Alert.rank)
+            .limit(1)
         ).first()
         return {
             "total": sum(counts.values()),

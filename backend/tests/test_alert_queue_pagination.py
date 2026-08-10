@@ -94,6 +94,8 @@ def queue():
 
     app.dependency_overrides[get_session] = _override
     client = TestClient(app)
+    # Exposed so a test can seed rows the endpoint then has to account for.
+    client.session_factory = S
     statements.clear()
     return client, statements
 
@@ -215,3 +217,39 @@ def test_alert_type_falls_back_when_the_column_is_empty(queue):
         alert_type=None,
     )
     assert diag.alert_type(alert) == "ring_signal"
+
+
+def test_naming_a_run_returns_that_runs_whole_output(queue):
+    """A named run is inspected, not worked.
+
+    The working queue hides decided alerts, which is right for an analyst
+    picking up the next case and wrong for comparing what a threshold change
+    did — the rows someone already ruled on are exactly the ones you want to
+    see both runs' verdicts for.
+    """
+    client, _ = queue
+    from compliance.models import PipelineRun
+    from sqlalchemy import select as _select
+
+    # Attribute the seeded queue to a run, one of whose alerts is decided.
+    body = client.get("/api/alerts?page_size=1").json()
+    assert body["total"] == 239
+
+    session = client.session_factory()
+    run = PipelineRun(
+        as_of=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        settings={},
+        rules=[],
+        alert_count=240,
+    )
+    session.add(run)
+    session.flush()
+    session.execute(
+        Alert.__table__.update().values(run_id=run.id)
+    )
+    session.commit()
+    run_id = run.id
+
+    named = client.get(f"/api/alerts?run_id={run_id}&page_size=1").json()
+    # All 240, including the decided one the working queue drops.
+    assert named["total"] == 240
