@@ -33,7 +33,12 @@ from compliance.detection.timedensity import (
     local_time_of_day,
     time_is_unusual,
 )
-from compliance.detection.windows import HOME_COUNTRY, merchant_foreign_ratio
+from compliance.detection.windows import (
+    HOME_COUNTRY,
+    merchant_foreign_ratio,
+    merchant_unsettled_ratio,
+    settled_sale,
+)
 from compliance.glossary import DETECTORS as GLOSSARY_DETECTORS
 from compliance.models import Merchant, MerchantProfile, Transaction
 
@@ -54,6 +59,8 @@ _DETECTOR_ORDER: list[str] = [
     "hour_vs_mcc_peers",
     "ticket_vs_subdistrict_peers",
     "foreign_card_ratio_vs_subdistrict",
+    "unsettled_ratio_vs_own_baseline",
+    "unsettled_ratio_vs_mcc_peers",
 ]
 
 _LABELS: dict[str, str] = {t.key: t.label for t in GLOSSARY_DETECTORS}
@@ -98,6 +105,9 @@ class DayData:
     hours: list[float]
     origins: list[str]
     foreign_ratio: float | None
+    # Share of the day's attempts that never settled. None when the merchant
+    # attempted nothing — no measurement, rather than a rate of zero.
+    unsettled_ratio: float | None = None
     # (source_txn_id, amount, hour, issuing country) per transaction, so a
     # detector can name the rows it fired on. Optional and defaulted, because
     # an alert written before this existed still has to render — it falls back
@@ -666,6 +676,45 @@ def study_merchant(
             else "Foreign card share within district norm",
         )
 
+    # ── 13-14. unsettled share, against own history and against the cohort ──
+    for detector, usable_key, center_key, dispersion_key, n_key, feature, subject in (
+        (
+            "unsettled_ratio_vs_own_baseline", "unsettled_usable",
+            "unsettled_center", "unsettled_dispersion", "unsettled_n",
+            "unsettled_share_vs_own_history", "this merchant's usual rate",
+        ),
+        (
+            "unsettled_ratio_vs_mcc_peers", "peer_unsettled_usable",
+            "peer_unsettled_center", "peer_unsettled_dispersion", "peer_merchants",
+            "unsettled_share_vs_mcc_peers", "the MCC norm",
+        ),
+    ):
+        if not m.get(usable_key) or day.unsettled_ratio is None:
+            _add(
+                detector, "SKIP", None, None, None, None, feature,
+                "Skipped (failed-transaction baseline not usable or no attempts)",
+            )
+            continue
+        ubase = Baseline(
+            center=m[center_key],
+            dispersion=m[dispersion_key],
+            method=DispersionMethod.MAD,
+            n=m.get(n_key) or 0,
+        )
+        uscore = score_value(day.unsettled_ratio, ubase)
+        # One-sided, as the pipeline is: failing less than usual is not a
+        # finding, and reporting it as one would fill the panel with merchants
+        # having a good day.
+        failing = uscore.is_outlier and day.unsettled_ratio > ubase.center
+        _add(
+            detector, "FAIL" if failing else "OK",
+            f"{day.unsettled_ratio:.1%}", f"{ubase.center:.1%}",
+            round(uscore.deviation, 2), uscore.band, feature,
+            f"Failed-transaction rate above {subject}"
+            if failing
+            else f"Failed-transaction rate in line with {subject}",
+        )
+
     return results
 
 
@@ -774,7 +823,7 @@ def fetch_day_data(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= _day_start,
                 Transaction.occurred_at < _day_end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -797,6 +846,7 @@ def fetch_day_data(
 
     # Foreign ratio
     foreign_ratio = merchant_foreign_ratio(session, merchant_id, as_of)
+    unsettled_ratio = merchant_unsettled_ratio(session, merchant_id, as_of)
 
     return DayData(
         amounts=amounts,
@@ -805,6 +855,7 @@ def fetch_day_data(
         hours=hours,
         origins=origins,
         foreign_ratio=foreign_ratio,
+        unsettled_ratio=unsettled_ratio,
         records=records,
     )
 

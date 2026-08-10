@@ -33,7 +33,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.windows import _cohort_column, _window_bounds
+from compliance.detection.windows import _cohort_column, _window_bounds, settled_sale
 from compliance.models import Merchant, Transaction
 
 HOURS_IN_DAY = 24.0
@@ -197,7 +197,7 @@ def fit_time_density(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -231,7 +231,7 @@ def fit_cohort_time_density(
             key.is_not(None),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
 

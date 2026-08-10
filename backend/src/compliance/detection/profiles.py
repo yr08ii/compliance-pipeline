@@ -17,7 +17,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.windows import HOME_COUNTRY, _window_bounds, has_card_origin
+from compliance.detection.windows import (
+    HOME_COUNTRY,
+    _window_bounds,
+    has_card_origin,
+    settled_sale,
+)
 from compliance.models import Merchant, Transaction
 
 # Trading hours are a local-time question: "3am" means 3am where the merchant
@@ -95,7 +100,7 @@ def fit_origin_mix(
             Transaction.merchant_id == merchant_id,
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
             Transaction.card_issuing_country != HOME_COUNTRY,
             *has_card_origin(),
         )

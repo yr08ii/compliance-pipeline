@@ -45,8 +45,13 @@ from compliance.detection.windows import (
     fit_peer_foreign_ratio_baselines,
     fit_peer_transaction_baselines,
     merchant_foreign_ratio,
+    merchant_unsettled_ratio,
     has_card_origin,
     HOME_COUNTRY,
+    settled_sale,
+    fit_unsettled_ratio_baselines,
+    fit_peer_unsettled_ratio_baselines,
+    UNSETTLED_STATUSES,
     fit_peer_volume_baselines,
     fit_trend,
     fit_velocity_baselines,
@@ -114,6 +119,8 @@ PEER_HOUR_DETECTOR = "hour_vs_mcc_peers"
 PEER_DISTRICT_AMOUNT_DETECTOR = "ticket_vs_subdistrict_peers"
 PEER_FOREIGN_DETECTOR = "foreign_card_ratio_vs_subdistrict"
 RAIL_DETECTOR = "amount_vs_payment_method_baseline"
+UNSETTLED_DETECTOR = "unsettled_ratio_vs_own_baseline"
+PEER_UNSETTLED_DETECTOR = "unsettled_ratio_vs_mcc_peers"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -161,6 +168,13 @@ def profile(session: Session, *, as_of: datetime) -> None:
     foreign_ratios = fit_peer_foreign_ratio_baselines(
         session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
     )
+    unsettled = fit_unsettled_ratio_baselines(
+        session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS,
+        lag_days=LAG_DAYS,
+    )
+    peer_unsettled = fit_peer_unsettled_ratio_baselines(
+        session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
+    )
     velocities = fit_velocity_baselines(
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
@@ -178,6 +192,8 @@ def profile(session: Session, *, as_of: datetime) -> None:
         cohort_hour = cohort_hours.get(merchant.mcc) if merchant else None
         district_txn = district_txns.get(district) if district else None
         foreign = foreign_ratios.get(district) if district else None
+        unsettled_own = unsettled.get(merchant_id)
+        unsettled_peer = peer_unsettled.get(merchant.mcc) if merchant else None
         trend = fit_trend(
             session,
             merchant_id,
@@ -242,6 +258,25 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "foreign_center": foreign.center if foreign else None,
                     "foreign_dispersion": foreign.dispersion if foreign else None,
                     "foreign_usable": bool(foreign and foreign.usable),
+                    "unsettled_center": (
+                        unsettled_own.center if unsettled_own else None
+                    ),
+                    "unsettled_dispersion": (
+                        unsettled_own.dispersion if unsettled_own else None
+                    ),
+                    "unsettled_n": unsettled_own.n if unsettled_own else 0,
+                    "unsettled_usable": bool(
+                        unsettled_own and unsettled_own.usable
+                    ),
+                    "peer_unsettled_center": (
+                        unsettled_peer.center if unsettled_peer else None
+                    ),
+                    "peer_unsettled_dispersion": (
+                        unsettled_peer.dispersion if unsettled_peer else None
+                    ),
+                    "peer_unsettled_usable": bool(
+                        unsettled_peer and unsettled_peer.usable
+                    ),
                     # The estimated density is stored so an auditor can see the
                     # pattern an alert was judged against. At full merchant
                     # scale this should be handed between stages in memory
@@ -478,7 +513,7 @@ def _scored_day_peak_rate(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -493,7 +528,7 @@ def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> li
             select(Transaction.occurred_at).where(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= as_of,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     ]
@@ -514,7 +549,7 @@ def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> 
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
                 Transaction.card_issuing_country != HOME_COUNTRY,
                 *has_card_origin(),
             )
@@ -534,7 +569,7 @@ def _scored_day_amounts_for_rail(
                 Transaction.card_type == rail,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -810,6 +845,82 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     ),
                 })
 
+        # Unsettled share, against this merchant's own history and against its
+        # trade. Both are needed and neither replaces the other: a card-not-
+        # present business legitimately fails more often than a supermarket
+        # till, so only the cohort can say whether a level is remarkable — and
+        # a merchant that has always run hot is only news when it changes,
+        # which only its own history can say.
+        unsettled_ratio = None
+        if p.metrics.get("unsettled_usable") or p.metrics.get(
+            "peer_unsettled_usable"
+        ):
+            unsettled_ratio = merchant_unsettled_ratio(session, p.merchant_id, as_of)
+
+        if unsettled_ratio is not None and p.metrics.get("unsettled_usable"):
+            own_base = Baseline(
+                center=p.metrics["unsettled_center"],
+                dispersion=p.metrics["unsettled_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["unsettled_n"],
+            )
+            own_score = score_value(unsettled_ratio, own_base)
+            # One-sided: failing *less* than usual is not a compliance finding.
+            if own_score.is_outlier and unsettled_ratio > own_base.center:
+                failed = [
+                    r for r in day_rows if r.status in UNSETTLED_STATUSES
+                ]
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": UNSETTLED_DETECTOR,
+                    "sub_score": min(own_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "unsettled_share_vs_own_history",
+                        "merchant_value": round(unsettled_ratio, 4),
+                        "baseline_value": round(own_base.center, 4),
+                        "deviation": round(own_score.deviation, 2),
+                    },
+                    # The failed attempts themselves, with the status that
+                    # makes each one a failure — so the ledger highlights the
+                    # outcome column rather than the whole row.
+                    "contributions": _contributions(
+                        failed, "transaction_status",
+                        f"did not settle, against this merchant's usual "
+                        f"{own_base.center:.1%}",
+                    ),
+                })
+
+        if unsettled_ratio is not None and p.metrics.get("peer_unsettled_usable"):
+            peer_base = Baseline(
+                center=p.metrics["peer_unsettled_center"],
+                dispersion=p.metrics["peer_unsettled_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics.get("peer_merchants") or 0,
+            )
+            peer_score = score_value(unsettled_ratio, peer_base)
+            if peer_score.is_outlier and unsettled_ratio > peer_base.center:
+                failed = [
+                    r for r in day_rows if r.status in UNSETTLED_STATUSES
+                ]
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_UNSETTLED_DETECTOR,
+                    "sub_score": min(peer_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "unsettled_share_vs_mcc_peers",
+                        "merchant_value": round(unsettled_ratio, 4),
+                        "baseline_value": round(peer_base.center, 4),
+                        "deviation": round(peer_score.deviation, 2),
+                    },
+                    "contributions": _contributions(
+                        failed, "transaction_status",
+                        f"did not settle, against an MCC norm of "
+                        f"{peer_base.center:.1%}",
+                    ),
+                })
+
         # Foreign-card share against the district norm. Foreignness is not the
         # signal — an airport shop sees tourists all day; sitting far from the
         # norm for where you trade is.
@@ -1039,7 +1150,7 @@ def _daily_value(
             Transaction.merchant_id == merchant_id,
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
     per_day: dict[date, float] = {}
@@ -1203,6 +1314,11 @@ def rings(
                 Transaction.hashed_pan != "",
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
+                # Deliberately not `settled_sale()`. Ring detection asks where
+                # a card was presented, not where it succeeded — and a card
+                # declined at merchant after merchant is the card-testing ring
+                # this family exists to find. Filtering failures out here would
+                # blind it to its strongest case.
                 Transaction.is_refund.is_(False),
             )
         )

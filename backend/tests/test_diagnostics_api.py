@@ -268,7 +268,10 @@ class TestDiagnostics:
         body = client.get("/api/alerts/1/diagnostics").json()
         families = [d["family"] for d in body["detectors"]]
 
-        assert families.count("A") == 12
+        # Twelve baselines plus the two failed-transaction rates, which report
+        # a verdict like the rest — a rate checked and found ordinary is
+        # information, not an absence.
+        assert families.count("A") == 14
         assert families.count("B") == len(default_instances(Family.B))
         assert {d["status"] for d in body["detectors"]} <= {"OK", "FAIL", "SKIP"}
         assert any(d["status"] == "FAIL" for d in body["detectors"])

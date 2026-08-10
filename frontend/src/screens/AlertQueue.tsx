@@ -16,12 +16,16 @@ const TYPE_TONE: Record<string, Tone> = {
   // badges rather than being folded into the four above.
   typology_match: "danger",
   ring_signal: "navy",
+  // Attempts that moved no money. Its own badge because the analyst opens it
+  // expecting a terminal being tested, not a large sale to explain.
+  failed_txn_rate: "warning",
 };
 
 const TYPE_ORDER = [
   "single_txn_spike",
   "typology_match",
   "ring_signal",
+  "failed_txn_rate",
   "mcc_peer_discrepancy",
   "subdistrict_anomaly",
   "temporal_anomaly",
