@@ -70,20 +70,29 @@ class TestTradingHours:
 
 
 class TestOriginMix:
-    def test_learns_the_usual_card_origins(self, session):
-        session.add(Merchant(merchant_id="LOCAL", mcc="5411"))
+    def test_learns_the_usual_overseas_card_origins(self, session):
+        """The mix is over foreign issuers; home cards are not in the sample."""
+        session.add(Merchant(merchant_id="MIXED", mcc="5411"))
         for day in range(1, 20):
             for _ in range(5):
-                _txn(session, "LOCAL", 10, day, country="HK")
+                _txn(session, "MIXED", 10, day, country="HK")
+            for country in ("CN", "TW"):
+                _txn(session, "MIXED", 10, day, country=country)
         session.flush()
 
-        mix = fit_origin_mix(session, "LOCAL", AS_OF, 30)
+        mix = fit_origin_mix(session, "MIXED", AS_OF, 30)
 
         assert mix.usable
-        assert mix.share("HK") > 0.9
-        assert origin_surprisal("HK", mix) < origin_surprisal("RU", mix)
+        assert set(mix.counts) == {"CN", "TW"}
+        assert origin_surprisal("CN", mix) < origin_surprisal("RU", mix)
 
-    def test_a_never_seen_origin_is_maximally_surprising(self, session):
+    def test_a_home_only_merchant_has_no_overseas_pattern(self, session):
+        """Nothing to compare against, so nothing is scored.
+
+        A merchant that has only ever taken home cards has no overseas history,
+        and the detector must not manufacture one — under the old mix its first
+        tourist was maximally surprising by construction.
+        """
         session.add(Merchant(merchant_id="LOCAL", mcc="5411"))
         for day in range(1, 20):
             for _ in range(5):
@@ -92,6 +101,21 @@ class TestOriginMix:
 
         mix = fit_origin_mix(session, "LOCAL", AS_OF, 30)
 
+        assert mix.n == 0
+        assert not mix.usable
+        assert origin_surprisal("KP", mix) == 0.0
+
+    def test_a_never_seen_origin_is_maximally_surprising(self, session):
+        """Against a real overseas history, an unfamiliar country still is."""
+        session.add(Merchant(merchant_id="REGULAR", mcc="5411"))
+        for day in range(1, 20):
+            for _ in range(3):
+                _txn(session, "REGULAR", 10, day, country="CN")
+        session.flush()
+
+        mix = fit_origin_mix(session, "REGULAR", AS_OF, 30)
+
+        assert mix.usable
         assert origin_surprisal("KP", mix) > 3.0
 
     def test_a_merchant_that_always_sees_tourists_is_not_flagged(self, session):

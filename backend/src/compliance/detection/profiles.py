@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.windows import _window_bounds
+from compliance.detection.windows import HOME_COUNTRY, _window_bounds, has_card_origin
 from compliance.models import Merchant, Transaction
 
 # Trading hours are a local-time question: "3am" means 3am where the merchant
@@ -50,7 +50,24 @@ MIN_MEMBER_OBSERVATIONS = 10
 
 @dataclass(frozen=True)
 class OriginMix:
-    """A merchant's historical distribution of card issuing countries."""
+    """A merchant's historical distribution of *overseas* card issuers.
+
+    Home cards are excluded. Hong Kong is the overwhelming majority for almost
+    every merchant here, and while it sat in the distribution it set the scale:
+    an unfamiliar overseas country had to overcome a bucket holding most of the
+    mass before it registered, and two merchants with identical overseas
+    patterns scored differently according to how much domestic trade sat
+    underneath. The question this detector exists to ask is which *foreign*
+    countries are paying and whether that has changed, so the home country is
+    not in the sample.
+
+    Wallet rails are excluded too, for the plainer reason that they are not
+    cards and have no issuer.
+
+    The cost is coverage: measured on overseas cards alone, far fewer merchants
+    clear `MIN_OBSERVATIONS`, and one that does not is skipped rather than
+    guessed at.
+    """
 
     counts: dict[str, int]
     n: int
@@ -67,9 +84,10 @@ def fit_origin_mix(
     session: Session, merchant_id: str, as_of: datetime, window_days: int,
     lag_days: int = 0,
 ) -> OriginMix:
-    """Count the issuing countries the merchant normally sees.
+    """Count the overseas issuing countries the merchant normally sees.
 
-    Taken straight from `card_issuing_country`; no BIN lookup is needed.
+    Taken straight from `card_issuing_country`; no BIN lookup is needed. Home
+    cards and wallet rails are both outside the sample — see `OriginMix`.
     """
     start, end = _window_bounds(as_of, window_days, lag_days)
     origins = list(session.scalars(
@@ -78,7 +96,8 @@ def fit_origin_mix(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
             Transaction.is_refund.is_(False),
-            Transaction.card_issuing_country.is_not(None),
+            Transaction.card_issuing_country != HOME_COUNTRY,
+            *has_card_origin(),
         )
     ))
 

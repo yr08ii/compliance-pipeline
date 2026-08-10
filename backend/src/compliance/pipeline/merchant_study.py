@@ -33,7 +33,7 @@ from compliance.detection.timedensity import (
     local_time_of_day,
     time_is_unusual,
 )
-from compliance.detection.windows import merchant_foreign_ratio
+from compliance.detection.windows import HOME_COUNTRY, merchant_foreign_ratio
 from compliance.glossary import DETECTORS as GLOSSARY_DETECTORS
 from compliance.models import Merchant, MerchantProfile, Transaction
 
@@ -780,7 +780,11 @@ def fetch_day_data(
     )
     amounts = [r[0] for r in rows]
     hours = [local_time_of_day(r[1]) for r in rows]
-    origins = [r[2] for r in rows if r[2] is not None]
+    # Overseas cards only, matching the sample `fit_origin_mix` is built on.
+    # A wallet tap has no issuing country and a home card is not what this
+    # detector watches; scoring either against a foreign-only distribution
+    # would report both as unfamiliar.
+    origins = [r[2] for r in rows if r[2] and r[2] != HOME_COUNTRY]
     records = tuple(
         (r[3], r[0], local_time_of_day(r[1]), r[2]) for r in rows
     )

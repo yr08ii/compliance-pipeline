@@ -29,6 +29,31 @@ from compliance.detection.baselines import (
 )
 from compliance.models import Alert, Disposition, Merchant, Transaction
 
+# Where the portfolio trades. A card issued here is a home card; everything
+# else is overseas.
+HOME_COUNTRY = "HK"
+
+
+def has_card_origin():
+    """Rows that name a real issuing country.
+
+    Over half the extract is a wallet rail — Alipay, Octopus, WeChat Pay,
+    PayMe — and a wallet has no card to have been issued anywhere, so the
+    source writes `card_issuing_country` as an empty string. An empty string
+    is not NULL: it passed every null check and then compared unequal to "HK",
+    so each wallet tap counted as a foreign-issued card. On the scored day that
+    put the portfolio's mean foreign share at 53% against a true 10%.
+
+    Keyed on the absent country rather than on a list of wallet rails, so a
+    rail added to the extract tomorrow is handled without a code change — and
+    so the card transactions whose origin the extract simply does not carry are
+    excluded too, which is the same statement: origin unknown, no vote.
+    """
+    return (
+        Transaction.card_issuing_country.is_not(None),
+        Transaction.card_issuing_country != "",
+    )
+
 
 def _window_bounds(
     as_of: datetime, window_days: int, lag_days: int = 0
@@ -567,7 +592,7 @@ def fit_peer_foreign_ratio_baselines(
     *,
     lag_days: int = 0,
     dimension: str = "subdistrict",
-    home_country: str = "HK",
+    home_country: str = HOME_COUNTRY,
     exclude_quarantined: bool = True,
 ) -> dict[str, Baseline]:
     """Fit each district's normal share of foreign-issued cards.
@@ -576,6 +601,11 @@ def fit_peer_foreign_ratio_baselines(
     day and a residential grocer does not. What matters is a merchant sitting
     far from the norm *for where it trades*, which only a district cohort can
     say. One ratio per merchant, so a busy member cannot define the district.
+
+    Built over card transactions only, exactly as `merchant_foreign_ratio` is.
+    The two must share a definition: a norm assembled one way and a merchant
+    value assembled another are not the same quantity, and the comparison
+    between them means nothing.
     """
     from statistics import median as _median
 
@@ -587,7 +617,7 @@ def fit_peer_foreign_ratio_baselines(
         .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
         .where(
             key.is_not(None),
-            Transaction.card_issuing_country.is_not(None),
+            *has_card_origin(),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
             Transaction.is_refund.is_(False),
@@ -616,9 +646,23 @@ def fit_peer_foreign_ratio_baselines(
 
 
 def merchant_foreign_ratio(
-    session: Session, merchant_id: str, as_of: datetime, home_country: str = "HK"
+    session: Session,
+    merchant_id: str,
+    as_of: datetime,
+    home_country: str = HOME_COUNTRY,
 ) -> float | None:
-    """Share of the scored day's transactions on foreign-issued cards."""
+    """Share of the scored day's *card* transactions on foreign-issued cards.
+
+    Wallet rails take no part, on either side of the division. They are not
+    cards and have no issuing country, so counting them in the denominator
+    understates the share and counting them in the numerator — which is what
+    the missing empty-string guard used to do — inverts the measure entirely.
+
+    None, not zero, for a merchant that took no cards at all: roughly a fifth
+    of the portfolio trades on wallets alone on any given day, and a fabricated
+    zero would enter those merchants into a district comparison on a quantity
+    nobody measured.
+    """
     from compliance.pipeline.stages import scored_day_bounds
 
     start, end = scored_day_bounds(as_of)
@@ -629,7 +673,7 @@ def merchant_foreign_ratio(
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
-                Transaction.card_issuing_country.is_not(None),
+                *has_card_origin(),
             )
         )
     )

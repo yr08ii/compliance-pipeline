@@ -45,6 +45,8 @@ from compliance.detection.windows import (
     fit_peer_foreign_ratio_baselines,
     fit_peer_transaction_baselines,
     merchant_foreign_ratio,
+    has_card_origin,
+    HOME_COUNTRY,
     fit_peer_volume_baselines,
     fit_trend,
     fit_velocity_baselines,
@@ -495,6 +497,13 @@ def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> li
 
 
 def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> list[str]:
+    """The scored day's overseas issuing countries.
+
+    Scoped identically to `fit_origin_mix`. A day scored on a wider set than
+    the baseline was fitted on would put home cards and wallet taps through a
+    distribution that contains neither, and every one of them would come back
+    unfamiliar.
+    """
     start, end = scored_day_bounds(as_of)
     return [
         o for o in session.scalars(
@@ -503,7 +512,8 @@ def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> 
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
-                Transaction.card_issuing_country.is_not(None),
+                Transaction.card_issuing_country != HOME_COUNTRY,
+                *has_card_origin(),
             )
         )
     ]
@@ -692,7 +702,10 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # the signal — an airport shop always sees tourists; a change is.
         if p.metrics.get("origin_usable"):
             mix = OriginMix(dict(p.metrics["origin_counts"]), p.metrics["origin_n"])
-            with_origin = [r for r in sales if r.country]
+            # Overseas cards only, matching the sample the mix was fitted on.
+            with_origin = [
+                r for r in sales if r.country and r.country != HOME_COUNTRY
+            ]
             today = [r.country for r in with_origin]
             scored = [(o, origin_surprisal(o, mix)) for o in set(today)]
             flagged = [(o, s) for o, s in scored if s > SURPRISAL_FLAG]

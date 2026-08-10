@@ -65,9 +65,11 @@ DETECTORS: tuple[Term, ...] = (
     ),
     Term(
         "card_origin_vs_own_mix",
-        "Card origin vs own history",
-        "Transactions on cards issued in a country this merchant rarely or never sees.",
-        "Own history",
+        "Overseas card origin vs own history",
+        "Transactions on cards issued in an overseas country this merchant rarely or "
+        "never sees. Home-issued cards and wallet rails are outside this check — it "
+        "watches which foreign countries pay, and whether that has changed.",
+        "Own history of overseas cards",
     ),
     Term(
         "ticket_vs_mcc_peers",
@@ -110,8 +112,9 @@ DETECTORS: tuple[Term, ...] = (
     Term(
         "foreign_card_ratio_vs_subdistrict",
         "Overseas card share vs subdistrict baseline",
-        "A far higher share of transactions on overseas-issued cards than other merchants "
-        "in the same district.",
+        "A far higher share of card transactions on overseas-issued cards than other "
+        "merchants in the same district. Measured over cards only — wallet rails have "
+        "no issuing country and are not counted on either side of the share.",
         "Subdistrict peer group",
     ),
     # ---- Family B: typology rules. These match a pattern rather than measure
