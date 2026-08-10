@@ -107,6 +107,11 @@ export default function AlertQueue() {
         </Card>
       )}
 
+      {/* Counted across the working queue, so they say nothing about a past
+          run — showing "All 7173" above a two-row table would be a plain
+          contradiction. Triage happens on the current queue; a past run is
+          opened to compare, not to work. */}
+      {viewing == null && (
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
@@ -148,14 +153,23 @@ export default function AlertQueue() {
           );
         })}
       </div>
+      )}
 
       <Card
         title={
-          filter
-            ? `${g.alertType(filter)} — ${data?.total ?? 0} awaiting review`
-            : `${data?.total ?? 0} alerts awaiting review`
+          viewing != null
+            ? `Run ${viewing} — ${data?.total ?? 0} alert${
+                (data?.total ?? 0) === 1 ? "" : "s"
+              } raised`
+            : filter
+              ? `${g.alertType(filter)} — ${data?.total ?? 0} awaiting review`
+              : `${data?.total ?? 0} alerts awaiting review`
         }
-        subtitle="Highest blended risk first. Alerts leave this list once decided."
+        subtitle={
+          viewing != null
+            ? "Everything this run raised, including alerts already decided."
+            : "Highest blended risk first. Alerts leave this list once decided."
+        }
       >
         {!data ? (
           <p className="px-5 py-10 text-center text-[0.9rem] text-[var(--muted)]">Loading…</p>
