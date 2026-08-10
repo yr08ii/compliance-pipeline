@@ -41,6 +41,15 @@ def scored_date(alert: Alert) -> str:
 
 
 def alert_type(alert: Alert) -> str:
+    """The triage badge for an alert.
+
+    Prefers the column the run cached — the queue filters and counts on it, so
+    the badge must be the same value or the filter hides rows from the analyst
+    who asked for exactly them. Falls back to the derivation for rows written
+    before the column existed.
+    """
+    if alert.alert_type:
+        return alert.alert_type
     detectors = alert.triggering_detectors or []
     first = detectors[0].get("detector", "") if detectors else ""
     return glossary.alert_type_for(first)

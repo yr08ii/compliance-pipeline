@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Integer, DateTime, ForeignKey, Boolean, Text
+from sqlalchemy import String, Float, Integer, DateTime, ForeignKey, Boolean, Text, event
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
+
+from compliance.glossary import alert_type_for
 
 
 def utcnow() -> datetime:
@@ -81,10 +83,32 @@ class Alert(Base):
     )
     lane: Mapped[str] = mapped_column(String)
     blended_score: Mapped[float] = mapped_column(Float)
-    rank: Mapped[int] = mapped_column(Integer)
+    rank: Mapped[int] = mapped_column(Integer, index=True)
+    # The triage badge, derived from the first triggering detector and cached
+    # here so the queue can filter and count in the database. Deriving it in
+    # Python meant every page view had to materialise the entire open queue —
+    # tens of thousands of rows, both JSON columns included — to answer a
+    # question about twenty of them. A cache, not a second source of truth:
+    # `diagnostics.alert_type` still derives it wherever this is unset.
+    alert_type: Mapped[str | None] = mapped_column(String, index=True, default=None)
     triggering_detectors: Mapped[list] = mapped_column(JSON, default=list)
     feature_snapshot: Mapped[list] = mapped_column(JSON, default=list)  # immutable in app logic
     disposition: Mapped["Disposition | None"] = relationship(back_populates="alert", uselist=False)
+
+
+@event.listens_for(Alert, "before_insert")
+def _fill_alert_type(mapper, connection, target: Alert) -> None:
+    """Never let an alert reach the table without its badge.
+
+    The queue filters and counts on this column, so a NULL is not a missing
+    label — it is an alert that no filter returns and no chip counts, invisible
+    to the analyst working that type. Filling it at the ORM boundary keeps the
+    column authoritative (and therefore indexable) whatever wrote the row.
+    """
+    if not target.alert_type:
+        detectors = target.triggering_detectors or []
+        first = detectors[0].get("detector", "") if detectors else ""
+        target.alert_type = alert_type_for(first)
 
 
 class Disposition(Base):

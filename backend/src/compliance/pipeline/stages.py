@@ -58,6 +58,7 @@ from compliance.detection.typology import (
     TypologyInput,
     evaluate as evaluate_typologies,
 )
+from compliance.glossary import alert_type_for
 from compliance.models import Alert, Disposition, Merchant, MerchantProfile, Transaction
 from compliance.pipeline.merchant_study import merchant_level_is_comparable
 from compliance.rules_store import active_rules
@@ -1219,6 +1220,10 @@ def score_and_rank(
             rank=rank,
             triggering_detectors=[detector_hit],
             feature_snapshot=[h["feature"]] if h.get("feature") else [],
+            # Cached at write time so the queue filters and counts in SQL.
+            # Derived from the same map the badge on the row uses, so the
+            # column cannot come to mean something the analyst does not see.
+            alert_type=alert_type_for(h["detector"]),
         )
         session.add(alert)
         alerts.append(alert)
