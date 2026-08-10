@@ -11,7 +11,7 @@ an audit requirement, not a preference.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import (
@@ -1246,14 +1246,50 @@ def rings(
     ]
 
 
+def _clear_superseded_alerts(session: Session, as_of: datetime) -> int:
+    """Drop the undecided alerts a previous run raised for this same day.
+
+    A run is the current statement about the day it scored, not an addition to
+    every statement made before it. Without this, re-running one scored day
+    stacked four runs' worth of near-identical alerts into one queue — 88,065
+    rows carrying about 7,000 distinct findings, with 99.6% of the last run's
+    merchant and alert-type pairs already present from the run before.
+
+    `as_of` alone cannot tell those runs apart, since they all scored the same
+    trading day. That is precisely why this is keyed on it: everything written
+    for this day is superseded by what is about to be written for it.
+
+    Decided alerts are kept. They record a judgement someone made, and a run
+    deleting them would erase who concluded what — the same reason a second
+    disposition on one alert is refused rather than overwritten.
+    """
+    undecided = ~select(Disposition.id).where(
+        Disposition.alert_id == Alert.id
+    ).exists()
+    result = session.execute(
+        delete(Alert).where(Alert.as_of == as_of, undecided)
+    )
+    session.flush()
+    return result.rowcount or 0
+
+
 def score_and_rank(
     session: Session, hits: list[dict], *, as_of: datetime | None = None
 ) -> list[Alert]:
     """Stage 5: one alert per flagged merchant, ranked, with its snapshot.
 
+    Idempotent per scored day, as every other stage is: re-scoring a day
+    replaces that day's open queue rather than adding a second copy of it.
+
     The feature snapshot is written once and never recomputed — training on
     features rebuilt later would leak the future into the model.
     """
+    # Only when the run names the day it scored. An unscoped run has no day to
+    # replace, and guessing at one is the single unrecoverable way to be wrong
+    # here, so it appends as before.
+    if as_of is not None:
+        _clear_superseded_alerts(session, as_of)
+
     # Ties broken on merchant then detector so two runs over the same data
     # produce the same ranks. Sorting on score alone leaves equal-scoring hits
     # in whatever order the query returned them, which makes `rank` — a column
