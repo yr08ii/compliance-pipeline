@@ -39,6 +39,23 @@ def alerts():
         yield list(session.scalars(__import__("sqlalchemy").select(Alert)))
 
 
+def raised_for(alerts, detector: str) -> list:
+    """The alerts a given detector raised.
+
+    The card-linkage rules raise one alert per card rather than one per
+    participating merchant, so the count itself is part of the contract.
+    """
+    return [
+        a for a in alerts
+        if any(h["detector"] == detector for h in a.triggering_detectors)
+    ]
+
+
+def linkage(alert) -> dict:
+    """The cross-merchant picture a Family C card rule recorded."""
+    return alert.triggering_detectors[0]["linkage"]
+
+
 def fired(alerts, detector: str) -> set[str]:
     """Merchants for which a given detector raised an alert."""
     return {
@@ -100,12 +117,70 @@ class TestFamilyC:
 
     def test_one_card_across_the_ring_branches_is_flagged(self, alerts):
         """Three related merchants is the shipped limit, and the generator
-        puts one card at all three, so the limit is exceeded."""
-        assert fired(alerts, "card_across_related_merchants") >= synthetic.RING_MEMBERS
+        puts one card at all three, so the limit is exceeded.
+
+        One card is one investigation, so it is one alert — attributed to a
+        member of the ring and naming the rest. Raising it once per branch
+        made the same finding arrive three times."""
+        raised = raised_for(alerts, "card_across_related_merchants")
+        assert len(raised) == 1
+        assert raised[0].merchant_id in synthetic.RING_MEMBERS
+        assert linkage(raised[0])["merchants"] == sorted(synthetic.RING_MEMBERS)
+
+    def test_the_branch_finding_names_common_ownership(self, alerts):
+        """What distinguishes this rule from card swarming, and the thing the
+        analyst is asked to notice."""
+        raised = raised_for(alerts, "card_across_related_merchants")
+        assert linkage(raised[0])["related"] is True
 
     def test_impossible_travel_between_far_merchants(self, alerts):
-        hit = fired(alerts, "impossible_geo_velocity")
-        assert synthetic.FAR_A in hit and synthetic.FAR_B in hit
+        raised = raised_for(alerts, "impossible_geo_velocity")
+        assert len(raised) == 1
+        assert {synthetic.FAR_A, synthetic.FAR_B} == set(
+            linkage(raised[0])["merchants"]
+        )
+
+    def test_impossible_travel_shows_the_arithmetic(self, alerts):
+        """An analyst told a journey was impossible is owed the sum that says
+        so: the two places, the distance, the elapsed time, the implied speed,
+        and how far over the limit it lands."""
+        raised = raised_for(alerts, "impossible_geo_velocity")
+        leg = linkage(raised[0])["legs"][0]
+        assert {leg["from_merchant"], leg["to_merchant"]} == {
+            synthetic.FAR_A,
+            synthetic.FAR_B,
+        }
+        assert leg["distance_km"] > 0
+        assert leg["minutes"] > 0
+        assert leg["kmh"] > leg["limit_kmh"]
+        assert leg["over_limit_multiple"] > 1
+
+    def test_the_linked_evidence_spans_both_merchants(self, alerts):
+        """"Show me this card's transactions at all of them" is the analyst's
+        actual question, so the evidence does not stop at the merchant
+        carrying the alert."""
+        raised = raised_for(alerts, "impossible_geo_velocity")
+        contributions = raised[0].triggering_detectors[0]["contributions"]
+        assert {c["value"] for c in contributions} == {
+            synthetic.FAR_A,
+            synthetic.FAR_B,
+        }
+
+    def test_wallet_rails_never_raise_a_card_linkage_alert(self, alerts):
+        """Alipay, Octopus, WeChat Pay and PayMe carry no card number. The
+        source writes the column blank, so every wallet row compares equal to
+        every other — which read as one card at thousands of merchants and
+        produced tens of thousands of ring alerts against the real extract."""
+        card_rules = {
+            "card_across_related_merchants",
+            "card_swarm",
+            "impossible_geo_velocity",
+        }
+        for alert in alerts:
+            for hit in alert.triggering_detectors:
+                if hit["detector"] not in card_rules:
+                    continue
+                assert alert.merchant_id not in synthetic.WALLET_ONLY_MERCHANTS
 
     def test_ring_alerts_never_carry_the_card_hash(self, alerts):
         """The PAN hash is brute-forceable, so it is cardholder data and must

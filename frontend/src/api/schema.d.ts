@@ -297,6 +297,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/alerts/{alert_id}/linked-transactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Linked Transactions
+         * @description The same card's activity across every merchant a ring alert names.
+         *
+         *     Separate from the day ledger because it answers a different question.
+         *     The ledger shows one merchant's day; a card-linkage finding is a claim
+         *     about several merchants at once, and its evidence is unreadable when
+         *     half of it sits behind another merchant's page.
+         *
+         *     Empty for alerts with no card-linkage finding, which is most of them.
+         */
+        get: operations["get_linked_transactions_api_alerts__alert_id__linked_transactions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/merchants/{merchant_id}/transactions": {
         parameters: {
             query?: never;
@@ -452,6 +479,45 @@ export interface components {
             /** Quarantined Days */
             quarantined_days: number | null;
         };
+        /**
+         * CardLink
+         * @description One card-linkage finding, across every merchant it touched.
+         */
+        CardLink: {
+            /** Detector */
+            detector: string;
+            /** Label */
+            label: string;
+            /** Card Ref */
+            card_ref: string;
+            /** Related */
+            related: boolean;
+            /** Merchants */
+            merchants: string[];
+            /** Legs */
+            legs: components["schemas"]["GeoLeg"][];
+            /** Transactions */
+            transactions: components["schemas"]["LinkedRow"][];
+            /**
+             * Trail
+             * @default []
+             */
+            trail: components["schemas"]["TrailMerchant"][];
+            /** First Seen */
+            first_seen?: string | null;
+            /** Last Seen */
+            last_seen?: string | null;
+            /**
+             * Total Amount
+             * @default 0
+             */
+            total_amount: number;
+            /**
+             * Rails
+             * @default []
+             */
+            rails: string[];
+        };
         /** CaseDetail */
         CaseDetail: {
             /** Disposition Id */
@@ -591,6 +657,10 @@ export interface components {
              * @default []
              */
             contributions: components["schemas"]["TxnContribution"][];
+            /** Linkage */
+            linkage?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * DetectorVerdict
@@ -708,6 +778,42 @@ export interface components {
             deviation: number;
         };
         /**
+         * GeoLeg
+         * @description One hop a card made, and the arithmetic that calls it impossible.
+         *
+         *     Every term is shown rather than a verdict. An analyst asked to accept that
+         *     a cardholder could not have made a journey is owed the distance, the
+         *     elapsed time, the speed those imply, and the limit being compared against.
+         */
+        GeoLeg: {
+            /** From Merchant */
+            from_merchant: string;
+            /** From Place */
+            from_place: string;
+            /** From Txn Id */
+            from_txn_id: string;
+            /** From Time */
+            from_time: string;
+            /** To Merchant */
+            to_merchant: string;
+            /** To Place */
+            to_place: string;
+            /** To Txn Id */
+            to_txn_id: string;
+            /** To Time */
+            to_time: string;
+            /** Distance Km */
+            distance_km: number;
+            /** Minutes */
+            minutes: number;
+            /** Kmh */
+            kmh: number;
+            /** Limit Kmh */
+            limit_kmh: number;
+            /** Over Limit Multiple */
+            over_limit_multiple: number;
+        };
+        /**
          * Glossary
          * @description Every identifier that can reach a person, translated.
          */
@@ -804,6 +910,61 @@ export interface components {
             currency: string | null;
             /** Is Outlier */
             is_outlier: boolean;
+        };
+        /**
+         * LinkedRow
+         * @description One transaction of a linked card, at whichever merchant took it.
+         *
+         *     No PAN hash, here least of all: this view exists precisely because several
+         *     merchants are involved, and the card that connects them is the one thing
+         *     that must not travel with the evidence.
+         */
+        LinkedRow: {
+            /** Source Txn Id */
+            source_txn_id: string;
+            /** Merchant Id */
+            merchant_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Total Amount */
+            total_amount: number;
+            /** Card Type */
+            card_type: string | null;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** Merchant District */
+            merchant_district: string | null;
+            /** Merchant Subdistrict */
+            merchant_subdistrict: string | null;
+            /** Is Alert Merchant */
+            is_alert_merchant: boolean;
+            /** Owner Group */
+            owner_group: string | null;
+            /** Minutes Since Previous */
+            minutes_since_previous: number | null;
+            /**
+             * Is Focus
+             * @default false
+             */
+            is_focus: boolean;
+            /** Arrived At Kmh */
+            arrived_at_kmh?: number | null;
+            /** Arrived From Km */
+            arrived_from_km?: number | null;
+        };
+        /** LinkedTransactions */
+        LinkedTransactions: {
+            /** Alert Id */
+            alert_id: number;
+            /** Merchant Id */
+            merchant_id: string;
+            /** Links */
+            links: components["schemas"]["CardLink"][];
         };
         /**
          * PeerDistribution
@@ -931,6 +1092,44 @@ export interface components {
             modified_z: number | null;
             /** Method */
             method: string;
+        };
+        /**
+         * TrailMerchant
+         * @description One merchant on a card's trail, summarised.
+         *
+         *     The header of a card-linkage case is a list of merchants, not one
+         *     merchant — so the merchants need enough with them to be read at a glance
+         *     without opening each.
+         */
+        TrailMerchant: {
+            /** Merchant Id */
+            merchant_id: string;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** District */
+            district: string | null;
+            /** Subdistrict */
+            subdistrict: string | null;
+            /** Owner Group */
+            owner_group: string | null;
+            /** Is Alert Merchant */
+            is_alert_merchant: boolean;
+            /** Transactions */
+            transactions: number;
+            /** Total Amount */
+            total_amount: number;
+            /**
+             * First Seen
+             * Format: date-time
+             */
+            first_seen: string;
+            /**
+             * Last Seen
+             * Format: date-time
+             */
+            last_seen: string;
         };
         /**
          * TxnContribution
@@ -1386,6 +1585,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Diagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_linked_transactions_api_alerts__alert_id__linked_transactions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkedTransactions"];
                 };
             };
             /** @description Validation Error */

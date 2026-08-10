@@ -62,3 +62,10 @@ class RuleHit:
     # empty rather than inventing a number to fill the panel.
     feature: dict | None = None
     contributions: tuple[Contribution, ...] = ()
+    # Set by the cross-merchant rules only. A finding about one card spans
+    # several merchants, and neither `feature` (one number) nor
+    # `contributions` (a flat list of rows) can express which merchants were
+    # involved or what the journey between them was. Free-form because the
+    # three card rules answer different questions; the keys each writes are
+    # documented where it writes them.
+    linkage: dict | None = None

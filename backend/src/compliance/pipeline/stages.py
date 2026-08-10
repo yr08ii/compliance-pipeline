@@ -27,7 +27,9 @@ from compliance.detection.timedensity import (
     fit_cohort_time_density,
     fit_time_density,
     local_time_of_day,
+    temporal_severity,
     time_is_unusual,
+    unusualness_depth,
 )
 from compliance.detection.windows import (
     _window_bounds,
@@ -57,6 +59,7 @@ from compliance.detection.typology import (
     evaluate as evaluate_typologies,
 )
 from compliance.models import Alert, Disposition, Merchant, MerchantProfile, Transaction
+from compliance.pipeline.merchant_study import merchant_level_is_comparable
 from compliance.rules_store import active_rules
 from compliance.settings_store import load_settings
 
@@ -606,7 +609,15 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
                     "detector": HOUR_DETECTOR,
-                    "sub_score": 0.5,
+                    # Ranked on how much of the day fell outside the pattern
+                    # and how far outside it sat. A flat score left every
+                    # temporal alert tied, so their order in the queue was
+                    # whatever the tie-break produced.
+                    "sub_score": temporal_severity(
+                        odd_count=len(odd),
+                        day_count=len(sales),
+                        depth=unusualness_depth(worst_hour, hours),
+                    ),
                     "feature": {
                         "feature_name": "transaction_hour",
                         "merchant_value": round(worst_hour, 2),
@@ -674,7 +685,11 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
                     "detector": PEER_HOUR_DETECTOR,
-                    "sub_score": 0.5,
+                    "sub_score": temporal_severity(
+                        odd_count=len(odd),
+                        day_count=len(sales),
+                        depth=unusualness_depth(worst_hour, ch),
+                    ),
                     "feature": {
                         "feature_name": "hour_vs_trade_hours",
                         "merchant_value": round(worst_hour, 2),
@@ -836,7 +851,11 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # Peer test 2 — is this MERCHANT unusual for its cohort? Catches the
         # systematic case test 1 cannot: every ticket sits inside the cohort's
         # range, but the merchant's whole level is shifted.
-        if p.metrics.get("peer_usable") and p.metrics.get("baseline_center"):
+        #
+        # The gate is shared with the case page rather than restated here. Two
+        # copies drifted once already, and the queue then carried alerts whose
+        # own evidence page reported the check as never having run.
+        if merchant_level_is_comparable(p.metrics, day_count=len(sales)) is None:
             cohort = Baseline(
                 center=p.metrics["peer_center"],
                 dispersion=p.metrics["peer_dispersion"],
@@ -1083,21 +1102,32 @@ def rings(
     ]
 
     start, end = scored_day_bounds(as_of)
+    # `!= ""` is not redundant with `is_not(None)`. The source writes
+    # `hashed_pan` as an empty string on every wallet rail — a wallet has no
+    # card number to hash — and over half the real extract is a wallet. An
+    # empty string is not NULL, so those rows pass a null check and then all
+    # compare *equal to one another*: one "card" appearing at thousands of
+    # merchants, which every card-linkage rule below reports as a ring.
+    # Ingestion now folds blank to NULL, and this guard covers rows loaded
+    # before it did.
     events = [
         CardEvent(
             pan_key=pan,
             merchant_id=merchant_id,
             source_txn_id=txn_id,
             occurred_at=occurred_at,
+            card_type=card_type,
         )
-        for pan, merchant_id, txn_id, occurred_at in session.execute(
+        for pan, merchant_id, txn_id, occurred_at, card_type in session.execute(
             select(
                 Transaction.hashed_pan,
                 Transaction.merchant_id,
                 Transaction.source_txn_id,
                 Transaction.occurred_at,
+                Transaction.card_type,
             ).where(
                 Transaction.hashed_pan.is_not(None),
+                Transaction.hashed_pan != "",
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
                 Transaction.is_refund.is_(False),
@@ -1133,6 +1163,11 @@ def rings(
             "message": r.hit.message,
             "feature": r.hit.feature,
             "contributions": [c.as_dict() for c in r.hit.contributions],
+            # The cross-merchant picture: which merchants the card touched,
+            # and for geo-velocity the arithmetic of each impossible leg. One
+            # alert now stands for a whole card, so the alert has to carry
+            # what the other merchants were.
+            "linkage": r.hit.linkage,
         }
         for r in evaluate_rings(
             RingInput(merchants=merchants, card_events=events, flagged=flagged),
@@ -1170,6 +1205,11 @@ def score_and_rank(
         # retuned thresholds would otherwise rewrite the past.
         if h.get("contributions"):
             detector_hit["contributions"] = h["contributions"]
+        # Family C only: the merchants a card connected, and the journey
+        # between them. Frozen for the same reason as everything else here —
+        # a later run's portfolio is a different portfolio.
+        if h.get("linkage"):
+            detector_hit["linkage"] = h["linkage"]
 
         alert = Alert(
             merchant_id=h["merchant_id"],

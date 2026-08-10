@@ -18,6 +18,11 @@ export type RuleTemplateOut = components["schemas"]["RuleTemplateOut"];
 export type RuleInstanceIn = components["schemas"]["RuleInstanceIn"];
 export type RuleParam = components["schemas"]["RuleParam"];
 export type TxnContribution = components["schemas"]["TxnContribution"];
+export type LinkedTransactions = components["schemas"]["LinkedTransactions"];
+export type CardLink = components["schemas"]["CardLink"];
+export type LinkedRow = components["schemas"]["LinkedRow"];
+export type GeoLeg = components["schemas"]["GeoLeg"];
+export type TrailMerchant = components["schemas"]["TrailMerchant"];
 
 /** POST/PUT helper. Throws with the server's message so a failed decision
  *  surfaces the reason rather than failing silently. */

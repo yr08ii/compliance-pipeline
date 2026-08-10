@@ -135,6 +135,109 @@ function formatParam(p: RuleParam, value: number) {
   return `${value.toLocaleString()} ${UNIT[p.kind] ?? ""}`.trim();
 }
 
+/** Per-MCC exceptions to the outlier threshold.
+ *
+ *  Sits directly under the global outlier slider rather than in a card of its
+ *  own further down, because it is not a separate setting: it is the *same*
+ *  setting for one trade, and it is the only one of these thresholds that can
+ *  be overridden at all. Presenting it as a peer of the other sliders implied
+ *  the rest could be overridden too, and put the exception a screen away from
+ *  the rule it excepts. */
+function MccOverrides({
+  overrides,
+  onChange,
+}: {
+  overrides: Record<string, Record<string, number>>;
+  onChange: (next: Record<string, Record<string, number>>) => void;
+}) {
+  const [mcc, setMcc] = useState("");
+  const [z, setZ] = useState("4.5");
+  const entries = Object.entries(overrides ?? {});
+
+  return (
+    <div className="mt-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--blue-50)]/40 p-4">
+      <p className="text-[0.84rem] font-medium text-[var(--text-strong)]">
+        Exceptions for one merchant category
+      </p>
+      <p className="mt-0.5 text-[0.81rem] leading-5 text-[var(--muted)]">
+        The only threshold above that can be overridden. Some trades are
+        legitimately volatile — a jeweller&rsquo;s tickets are lumpy where a
+        grocer&rsquo;s are not — and holding both to one number means either
+        flooding the queue with jewellers or going blind to grocers. Categories
+        not listed here use the global threshold.
+      </p>
+
+      {entries.length > 0 && (
+        <table className="mt-3 w-full text-left text-[0.86rem]">
+          <thead className="border-b border-[var(--border)] text-[0.68rem] uppercase tracking-[0.12em] text-[var(--muted)]">
+            <tr>
+              <th className="py-2 font-semibold">MCC</th>
+              <th className="py-2 text-right font-semibold">Outlier threshold</th>
+              <th className="py-2" />
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([code, o]) => (
+              <tr key={code} className="border-b border-[var(--border)] last:border-b-0">
+                <td className="py-2 font-medium text-[var(--text-strong)]">{code}</td>
+                <td className="py-2 text-right metric-number">{o.outlier_z ?? "—"} σ</td>
+                <td className="py-2 text-right">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = { ...overrides };
+                      delete next[code];
+                      onChange(next);
+                    }}
+                    className="focus-ring text-[0.8rem] font-medium text-[var(--danger)] hover:underline"
+                  >
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <label>
+          <span className="text-[0.76rem] font-medium text-[var(--text-strong)]">
+            MCC code
+          </span>
+          <input
+            value={mcc}
+            onChange={(e) => setMcc(e.target.value)}
+            placeholder="5944"
+            className="focus-ring mt-1 block w-24 rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.86rem]"
+          />
+        </label>
+        <label>
+          <span className="text-[0.76rem] font-medium text-[var(--text-strong)]">
+            Threshold for it
+          </span>
+          <input
+            value={z}
+            onChange={(e) => setZ(e.target.value)}
+            className="focus-ring mt-1 block w-24 rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.86rem]"
+          />
+        </label>
+        <button
+          type="button"
+          disabled={!mcc || Number.isNaN(Number(z))}
+          onClick={() => {
+            onChange({ ...overrides, [mcc]: { outlier_z: Number(z) } });
+            setMcc("");
+          }}
+          className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-1.5 text-[0.86rem] font-medium text-[var(--text-strong)] transition hover:bg-white disabled:opacity-45"
+        >
+          Add exception
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** One rule instance: its parameters, its scope, and whether it runs. */
 function RuleCard({
   instance,
@@ -304,8 +407,6 @@ export default function Tuning() {
   const [ruleDraft, setRuleDraft] = useState<RuleInstanceIn[] | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mcc, setMcc] = useState("");
-  const [mccZ, setMccZ] = useState("4.5");
   const [adding, setAdding] = useState("");
 
   useEffect(() => {
@@ -481,95 +582,19 @@ export default function Tuning() {
                     <p className="mt-1 text-[0.82rem] leading-5 text-[var(--muted)]">
                       {c.hint}
                     </p>
+                    {/* The exception belongs against the rule it excepts. */}
+                    {c.key === "outlier_z" && (
+                      <MccOverrides
+                        overrides={draft.mcc_overrides ?? {}}
+                        onChange={(next) => set("mcc_overrides", next)}
+                      />
+                    )}
                   </div>
                 );
               })}
             </div>
           </Card>
 
-          <Card
-            title="Per-MCC overrides"
-            subtitle="Some trades are legitimately volatile — a jeweller's tickets are lumpy where a grocer's are not"
-          >
-            <div className="p-5">
-              {Object.keys(draft.mcc_overrides ?? {}).length === 0 ? (
-                <p className="text-[0.9rem] text-[var(--muted)]">
-                  No overrides. Every merchant category uses the global thresholds above.
-                </p>
-              ) : (
-                <table className="w-full text-left text-[0.88rem]">
-                  <thead className="border-b border-[var(--border)] text-[0.7rem] uppercase tracking-[0.12em] text-[var(--muted)]">
-                    <tr>
-                      <th className="py-2 font-semibold">MCC</th>
-                      <th className="py-2 text-right font-semibold">Outlier threshold</th>
-                      <th className="py-2" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(draft.mcc_overrides).map(([code, o]) => (
-                      <tr key={code} className="border-b border-[var(--border)] last:border-b-0">
-                        <td className="py-2 font-medium text-[var(--text-strong)]">{code}</td>
-                        <td className="py-2 text-right metric-number">
-                          {o.outlier_z ?? "—"} σ
-                        </td>
-                        <td className="py-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const next = { ...draft.mcc_overrides };
-                              delete next[code];
-                              set("mcc_overrides", next);
-                            }}
-                            className="focus-ring text-[0.82rem] font-medium text-[var(--danger)] hover:underline"
-                          >
-                            Remove
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-
-              <div className="mt-4 flex flex-wrap items-end gap-2 border-t border-[var(--border)] pt-4">
-                <label>
-                  <span className="text-[0.78rem] font-medium text-[var(--text-strong)]">
-                    MCC code
-                  </span>
-                  <input
-                    value={mcc}
-                    onChange={(e) => setMcc(e.target.value)}
-                    placeholder="5944"
-                    className="focus-ring mt-1 block w-28 rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-2 text-[0.88rem]"
-                  />
-                </label>
-                <label>
-                  <span className="text-[0.78rem] font-medium text-[var(--text-strong)]">
-                    Outlier threshold
-                  </span>
-                  <input
-                    value={mccZ}
-                    onChange={(e) => setMccZ(e.target.value)}
-                    className="focus-ring mt-1 block w-28 rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-3 py-2 text-[0.88rem]"
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={!mcc || Number.isNaN(Number(mccZ))}
-                  onClick={() => {
-                    set("mcc_overrides", {
-                      ...draft.mcc_overrides,
-                      [mcc]: { outlier_z: Number(mccZ) },
-                    });
-                    setMcc("");
-                  }}
-                  className="focus-ring rounded-[var(--radius)] border border-[var(--border-strong)] bg-white px-4 py-2 text-[0.88rem] font-medium text-[var(--text-strong)] transition hover:bg-[var(--blue-50)] disabled:opacity-45"
-                >
-                  Add override
-                </button>
-              </div>
-            </div>
-          </Card>
         </>
       )}
 

@@ -98,6 +98,24 @@ def _parse_time(value: str) -> datetime:
     raise ValueError(f"unparseable transaction time: {value!r}")
 
 
+def _text(value: object) -> str | None:
+    """A source string, or None when the source left it blank.
+
+    Blank is not a value. The real extract carries `hashed_pan=''` on every
+    wallet rail — Alipay, Octopus, WeChat Pay, PayMe have no card number to
+    hash — and stores `''` rather than omitting the column. Kept as an empty
+    string, those rows all compare *equal*, so anything that groups by the
+    column reads more than half the portfolio as one identifier: one card at
+    thousands of merchants, one ring containing every merchant with no
+    business registration on file. Folding blank to NULL is what makes
+    "absent" behave like absent.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def ingest_payload(session: Session, payload: str) -> IngestResult:
     """Load a delivered payload, skipping anything already stored."""
     rows = parse_json(payload)
@@ -127,9 +145,12 @@ def ingest_payload(session: Session, payload: str) -> IngestResult:
             merchants[merchant_id] = merchant
         # Merchant attributes are re-stated on every row; the latest delivery
         # wins, so status changes and re-registrations land without a separate feed.
+        # A blank does not win, though — it is the source omitting the column on
+        # that row, not the merchant losing its district.
         for field in _MERCHANT_FIELDS:
-            if row.get(field) is not None:
-                setattr(merchant, field, str(row[field]))
+            value = _text(row.get(field))
+            if value is not None:
+                setattr(merchant, field, value)
         touched.add(merchant_id)
 
         if payment_id in known:
@@ -153,8 +174,7 @@ def ingest_payload(session: Session, payload: str) -> IngestResult:
             is_refund=is_refund,
         )
         for field in _TXN_FIELDS:
-            if row.get(field) is not None:
-                setattr(txn, field, str(row[field]))
+            setattr(txn, field, _text(row.get(field)))
         session.add(txn)
         known.add(payment_id)
         inserted += 1

@@ -53,6 +53,18 @@ RING_C = "RINGC"
 RING_D = "RINGD"
 FAR_A = "FARA"  # two merchants a card cannot reach in the time between
 FAR_B = "FARB"
+# Wallet-only merchants, spread across the territory. Alipay, Octopus, WeChat
+# Pay and PayMe carry no card number, so the source writes `hashed_pan` blank
+# on every one of their rows — which means every wallet row compares equal to
+# every other. These merchants exist to prove that stays a non-event: they sit
+# far apart, trade at the same moments, and must never be read as one card
+# teleporting between them.
+WALLET_A = "WALLETA"
+WALLET_B = "WALLETB"
+WALLET_C = "WALLETC"
+WALLET_D = "WALLETD"
+WALLET_E = "WALLETE"
+WALLET_F = "WALLETF"
 
 
 # Real MCC wording, so a demo run exercises the same header the real data
@@ -146,7 +158,25 @@ SPECS = (
     # no card can cross in the minutes the generator puts between them.
     MerchantSpec(FAR_A, "5541", "Tung Chung", 400.0, 70.0, 5, 90),
     MerchantSpec(FAR_B, "5541", "Sai Kung", 420.0, 75.0, 5, 90),
+    # Wallet-only shops, deliberately as far apart as FAR_A and FAR_B and
+    # trading at the same times. Their rows all carry a blank `hashed_pan`,
+    # which is the exact condition that read as one card visiting every one
+    # of them. Nothing here may raise a card-linkage alert.
+    MerchantSpec(WALLET_A, "5814", "Tung Chung", 60.0, 12.0, 6, 90),
+    MerchantSpec(WALLET_B, "5814", "Sai Kung", 62.0, 12.0, 6, 90),
+    MerchantSpec(WALLET_C, "5814", "Tin Shui Wai", 58.0, 11.0, 6, 90),
+    MerchantSpec(WALLET_D, "5814", "Kwun Tong", 64.0, 13.0, 6, 90),
+    MerchantSpec(WALLET_E, "5814", "Central", 66.0, 13.0, 6, 90),
+    MerchantSpec(WALLET_F, "5814", "Wan Chai", 61.0, 12.0, 6, 90),
 )
+
+# Every merchant whose entire trade is on a wallet rail. No card-linkage rule
+# may ever raise an alert on one of them — there is no card to follow.
+WALLET_ONLY_MERCHANTS = frozenset(
+    {WALLET_A, WALLET_B, WALLET_C, WALLET_D, WALLET_E, WALLET_F}
+)
+# The rails these merchants trade on, cycled per transaction.
+WALLET_RAIL_CYCLE = ("ALIPAY", "OCTOPUS", "WECHAT", "PAYME")
 
 # Merchants sharing one business registration hash — the ring's ground truth.
 RING_MEMBERS = frozenset({RING_A, RING_B, RING_C, RING_D})
@@ -356,11 +386,23 @@ def generate_history(session: Session, *, as_of: datetime, seed: int = 7) -> Non
                         ),
                         is_refund=is_refund,
                         transaction_status=status,
-                        card_type="VISA",
+                        card_type=(
+                            WALLET_RAIL_CYCLE[n % len(WALLET_RAIL_CYCLE)]
+                            if spec.merchant_id in WALLET_ONLY_MERCHANTS
+                            else "VISA"
+                        ),
                         card_issuing_country=(
                             "US" if spec.merchant_id == TOURIST and scored else "HK"
                         ),
                         card_bin="457896",
+                        # Reproducing the source exactly: a wallet has no card
+                        # number, and the extract writes the column blank
+                        # rather than omitting it. Every one of these rows
+                        # therefore compares equal to every other, which is
+                        # the condition the card-linkage rules must survive.
+                        hashed_pan=(
+                            "" if spec.merchant_id in WALLET_ONLY_MERCHANTS else None
+                        ),
                         geo=spec.subdistrict,
                     )
                 )

@@ -106,6 +106,49 @@ class DayData:
 
 
 # ---------------------------------------------------------------------------
+# Gates shared with the pipeline
+# ---------------------------------------------------------------------------
+
+
+def merchant_level_is_comparable(metrics: dict, *, day_count: int) -> str | None:
+    """Why the merchant-vs-cohort level test cannot run, or None if it can.
+
+    Read by both the nightly pipeline, deciding whether to raise the alert,
+    and this module, explaining it on the case page. They held separate copies
+    of the condition and drifted: the pipeline fired on a peer cohort plus any
+    `baseline_center`, while the page also demanded `baseline_usable`. The
+    result was an alert titled "Merchant level vs MCC baseline" whose own
+    detail panel reported the check as skipped — the queue asserting something
+    the evidence page denied.
+
+    Returning the reason rather than a boolean is what keeps them honest: the
+    sentence the analyst reads is produced by the same call that decided not
+    to fire.
+
+    The three conditions, and why each is a condition:
+
+    * **A usable peer cohort.** There is nothing to compare against otherwise.
+    * **A usable baseline of the merchant's own.** This test compares one
+      *level* against another. A merchant with two transactions in its window
+      has a median — the median of two numbers is always defined — and no
+      level. Firing on it says "your typical ticket is 50x your trade's" about
+      a merchant that has no typical ticket yet.
+    * **Trade on the scored day.** The baseline window is lagged and does not
+      move overnight, so a silent merchant produces the identical finding every
+      night until somebody dispositions it. That is not a daily signal; it is
+      the same alert re-queued, and it is why the queue filled with merchants
+      showing zero transactions.
+    """
+    if not metrics.get("peer_usable"):
+        return "MCC peer cohort baseline not usable"
+    if not metrics.get("baseline_usable") or not metrics.get("baseline_center"):
+        return "this merchant has no usable baseline of its own to compare"
+    if not day_count:
+        return "the merchant did not trade on the scored day"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Pure core — no DB, no side effects
 # ---------------------------------------------------------------------------
 
@@ -469,15 +512,12 @@ def study_merchant(
         )
 
     # ── 8. merchant_level_vs_mcc_peers ──────────────────────────────────────
-    if (
-        not m.get("peer_usable")
-        or not m.get("baseline_center")
-        or not m.get("baseline_usable")
-    ):
+    blocked = merchant_level_is_comparable(m, day_count=day.count)
+    if blocked:
         _add(
             "merchant_level_vs_mcc_peers", "SKIP", None, None, None, None,
             "typical_ticket_vs_mcc_peers",
-            "Skipped (MCC peer merchant baseline not usable)",
+            f"Skipped — {blocked}",
         )
     else:
         cohort = Baseline(

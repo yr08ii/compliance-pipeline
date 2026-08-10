@@ -40,6 +40,44 @@ IDENTITY_FIELDS = (
     ("hashed_merchant_name", "trading name"),
 )
 
+# Rails that settle from a stored balance and therefore carry no card number.
+#
+# Over half the real extract is one of these, and the source writes
+# `hashed_pan` as an empty string rather than omitting it — there is nothing
+# to hash. Every rule below follows *one card* across merchants, and a rail
+# with no card cannot participate in that: an Octopus balance is not a card
+# that can be in two places at once.
+#
+# Excluding them by name as well as by the blank check is deliberate
+# redundancy. The blank check alone would silently start producing rings the
+# day the source began emitting a per-wallet token, and "one Alipay account
+# used at many shops" is a customer, not a ring.
+WALLET_RAILS = frozenset(
+    {
+        "ALIPAY",
+        "ALIPAYHK",
+        "OCTOPUS",
+        "WECHAT",
+        "WECHATPAY",
+        "PAYME",
+        "FPS",
+        "TAPNGO",
+        "TAP&GO",
+    }
+)
+
+
+def is_card_rail(card_type: str | None) -> bool:
+    """Whether a rail carries a card number the linkage rules can follow.
+
+    Unknown rails are treated as cards. A new card scheme must keep being
+    detected; a new *wallet* slipping through is caught by the blank-PAN check
+    that runs alongside this, because a wallet has no PAN to supply.
+    """
+    if not card_type:
+        return True
+    return " ".join(card_type.split()).strip().upper() not in WALLET_RAILS
+
 
 @dataclass(frozen=True)
 class MerchantNode:
@@ -70,6 +108,9 @@ class CardEvent:
     merchant_id: str
     source_txn_id: str
     occurred_at: datetime
+    # The rail, so a wallet can be excluded by name rather than only by the
+    # absence of a card number. See `WALLET_RAILS`.
+    card_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -238,12 +279,87 @@ def _agent_concentration(data: RingInput, inst: RuleInstance) -> list[RingHit]:
 
 
 def _by_card(events: list[CardEvent]) -> dict[str, list[CardEvent]]:
+    """One chronological chain per card, wallets and blank keys dropped.
+
+    The two exclusions are the whole reason this is a function rather than a
+    `groupby`. A blank `pan_key` is not a card: every wallet transaction in
+    the portfolio carries the same empty string, so grouping on it produces
+    one chain containing more than half the estate — a single "card" at
+    thousands of merchants, which every rule below then reports as a ring.
+    """
     grouped: dict[str, list[CardEvent]] = defaultdict(list)
     for e in events:
+        if not e.pan_key or not e.pan_key.strip():
+            continue
+        if not is_card_rail(e.card_type):
+            continue
         grouped[e.pan_key].append(e)
     for chain in grouped.values():
-        chain.sort(key=lambda e: e.occurred_at)
+        chain.sort(key=lambda e: (e.occurred_at, e.source_txn_id))
     return grouped
+
+
+def _card_refs(events: list[CardEvent]) -> dict[str, str]:
+    """A display label per card: "card 1", "card 2", …
+
+    An analyst needs to see that two findings concern the same card. They must
+    not be handed anything derived from the PAN hash to do it with — that hash
+    is brute-forceable back to a card number, and a truncation or re-hash of it
+    is still a function of cardholder data. A position in this run's sort order
+    carries no information about the card at all, which is the point.
+    """
+    order = sorted(
+        {e.pan_key for e in events if e.pan_key and e.pan_key.strip()}
+    )
+    return {key: f"card {i}" for i, key in enumerate(order, start=1)}
+
+
+def _linked_contributions(
+    trail: list[CardEvent], focus: set[str], reason: str
+) -> tuple[Contribution, ...]:
+    """The card's whole day, across every merchant, with the rule's own
+    transactions marked.
+
+    Two decisions here, both about what an analyst opening the case needs.
+
+    **The trail is the card's whole day, not only the transactions that
+    tripped the rule.** A finding that shows two transactions 20 minutes and
+    35 km apart raises the immediate question "what else did this card do?",
+    and the answer has to be on the page. Assembling it here rather than at
+    read time is what keeps `hashed_pan` inside this module: the case page
+    resolves transaction ids and never touches the card.
+
+    **The transactions the rule actually fired on are still distinguished**,
+    via `focus`. Widening the evidence must not blur what the accusation
+    rests on.
+    """
+    return tuple(
+        Contribution(
+            source_txn_id=e.source_txn_id,
+            field="merchant_id",
+            value=e.merchant_id,
+            reason=(
+                reason
+                if e.source_txn_id in focus
+                else "same card, same day — context for the trail"
+            ),
+        )
+        for e in sorted(trail, key=lambda e: (e.occurred_at, e.source_txn_id))
+    )
+
+
+def _busiest(events: list[CardEvent]) -> str:
+    """Which merchant carries the alert.
+
+    One card is one investigation, so it raises one alert, and an alert has to
+    sit in some merchant's queue to be anybody's responsibility. The merchant
+    with the most of the card's transactions is the one with the most to
+    explain. Ties break on merchant id so two runs over the same data agree.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for e in events:
+        counts[e.merchant_id] += 1
+    return min(counts, key=lambda m: (-counts[m], m))
 
 
 def _branch_structuring(data: RingInput, inst: RuleInstance) -> list[RingHit]:
@@ -255,9 +371,10 @@ def _branch_structuring(data: RingInput, inst: RuleInstance) -> list[RingHit]:
     """
     max_branches = int(inst.value("max_branches"))
     related = related_merchants(data.merchants)
+    refs = _card_refs(data.card_events)
 
     hits: list[RingHit] = []
-    for chain in _by_card(data.card_events).values():
+    for pan_key, chain in _by_card(data.card_events).items():
         # Split the card's day by which identity group each merchant belongs
         # to, so visiting three shops of one chain and three of another is not
         # added together into a false six.
@@ -266,54 +383,62 @@ def _branch_structuring(data: RingInput, inst: RuleInstance) -> list[RingHit]:
             group = related.get(event.merchant_id, frozenset()) | {event.merchant_id}
             per_day[(event.occurred_at.date(), tuple(sorted(group)))].append(event)
 
-        for (_day, group), events in per_day.items():
+        for (day, group), events in sorted(per_day.items()):
             if len(group) < 2:
                 continue  # not a chain — no branches to spread across
             touched = sorted({e.merchant_id for e in events})
             if len(touched) <= max_branches:
                 continue
 
-            for merchant_id in touched:
-                others = [m for m in touched if m != merchant_id]
-                hits.append(
-                    RingHit(
-                        merchant_id=merchant_id,
-                        hit=RuleHit(
-                            rule_id=inst.instance_id,
-                            template=inst.template,
-                            label=inst.display_label(),
-                            reason_code=_reason_code(inst, max_branches=max_branches),
-                            sub_score=min(0.5 + 0.1 * (len(touched) - max_branches), 1.0),
-                            message=(
-                                f"One card was used at {len(touched)} merchants "
-                                f"under common ownership in a single day "
-                                f"(limit {max_branches}): "
-                                f"{', '.join(others)} and this one."
-                            ),
-                            feature={
-                                "feature_name": "related_merchants_per_card_per_day",
-                                "merchant_value": float(len(touched)),
-                                "baseline_value": float(max_branches),
-                                "deviation": float(len(touched) - max_branches),
-                            },
-                            contributions=tuple(
-                                Contribution(
-                                    source_txn_id=e.source_txn_id,
-                                    # The linking field is the counterpart
-                                    # merchant, never the card identifier that
-                                    # actually did the linking.
-                                    field="merchant_id",
-                                    value=e.merchant_id,
-                                    reason=(
-                                        "same card, same owner group, same day"
-                                    ),
-                                )
-                                for e in events
-                                if e.merchant_id == merchant_id
-                            ),
+            # One finding for the card's day, not one per branch. The branches
+            # are the finding; reporting it once per branch turned a single
+            # investigation into four alerts saying the same thing.
+            carrier = _busiest(events)
+            others = [m for m in touched if m != carrier]
+            hits.append(
+                RingHit(
+                    merchant_id=carrier,
+                    hit=RuleHit(
+                        rule_id=inst.instance_id,
+                        template=inst.template,
+                        label=inst.display_label(),
+                        reason_code=_reason_code(inst, max_branches=max_branches),
+                        sub_score=min(0.5 + 0.1 * (len(touched) - max_branches), 1.0),
+                        message=(
+                            f"One card ({refs.get(pan_key, 'card')}) was used at "
+                            f"{len(touched)} merchants under common ownership on "
+                            f"{day.isoformat()} (limit {max_branches}): "
+                            f"{', '.join(others)} and this one. They share a "
+                            f"registration, address or trading name, so these are "
+                            f"branches of one chain rather than separate shops."
                         ),
-                    )
+                        feature={
+                            "feature_name": "related_merchants_per_card_per_day",
+                            "merchant_value": float(len(touched)),
+                            "baseline_value": float(max_branches),
+                            "deviation": float(len(touched) - max_branches),
+                        },
+                        contributions=_linked_contributions(
+                            chain,
+                            {e.source_txn_id for e in events},
+                            "same card, same owner group, same day",
+                        ),
+                        linkage={
+                            "card_ref": refs.get(pan_key, "card"),
+                            "merchants": touched,
+                            # The distinguishing fact of this rule against card
+                            # swarming, and the thing the analyst is asked to
+                            # notice: these merchants are one owner.
+                            "related": True,
+                            "day": day.isoformat(),
+                            "legs": [],
+                            "focus_txn_ids": sorted(
+                                e.source_txn_id for e in events
+                            ),
+                        },
+                    ),
                 )
+            )
     return hits
 
 
@@ -322,9 +447,10 @@ def _card_swarm(data: RingInput, inst: RuleInstance) -> list[RingHit]:
     min_merchants = int(inst.value("min_merchants"))
     window = timedelta(minutes=inst.value("window_minutes"))
     related = related_merchants(data.merchants)
+    refs = _card_refs(data.card_events)
 
     hits: list[RingHit] = []
-    for chain in _by_card(data.card_events).values():
+    for pan_key, chain in _by_card(data.card_events).items():
         start = 0
         for end in range(len(chain)):
             while chain[end].occurred_at - chain[start].occurred_at > window:
@@ -341,43 +467,54 @@ def _card_swarm(data: RingInput, inst: RuleInstance) -> list[RingHit]:
             if len(unrelated) < min_merchants:
                 continue
 
-            for merchant_id in sorted(unrelated):
-                hits.append(
-                    RingHit(
-                        merchant_id=merchant_id,
-                        hit=RuleHit(
-                            rule_id=inst.instance_id,
-                            template=inst.template,
-                            label=inst.display_label(),
-                            reason_code=_reason_code(
-                                inst, min_merchants=min_merchants,
-                                window_minutes=inst.value("window_minutes"),
-                            ),
-                            sub_score=min(0.4 + 0.1 * len(unrelated), 1.0),
-                            message=(
-                                f"One card was used at {len(touched)} unrelated "
-                                f"merchants within "
-                                f"{int(inst.value('window_minutes'))} minutes."
-                            ),
-                            feature={
-                                "feature_name": "unrelated_merchants_per_card_window",
-                                "merchant_value": float(len(touched)),
-                                "baseline_value": float(min_merchants),
-                                "deviation": float(len(touched) - min_merchants),
-                            },
-                            contributions=tuple(
-                                Contribution(
-                                    source_txn_id=e.source_txn_id,
-                                    field="occurred_at",
-                                    value=e.occurred_at.isoformat(),
-                                    reason="part of a same-card burst across merchants",
-                                )
-                                for e in window_events
-                                if e.merchant_id == merchant_id
-                            ),
+            # One finding for the card, attributed to one merchant. Raising it
+            # once per merchant in the swarm reported the same burst five
+            # times, which is five times the queue for one investigation.
+            carrier = _busiest(window_events)
+            hits.append(
+                RingHit(
+                    merchant_id=carrier,
+                    hit=RuleHit(
+                        rule_id=inst.instance_id,
+                        template=inst.template,
+                        label=inst.display_label(),
+                        reason_code=_reason_code(
+                            inst, min_merchants=min_merchants,
+                            window_minutes=inst.value("window_minutes"),
                         ),
-                    )
+                        sub_score=min(0.4 + 0.1 * len(unrelated), 1.0),
+                        message=(
+                            f"One card ({refs.get(pan_key, 'card')}) was used at "
+                            f"{len(touched)} unrelated merchants within "
+                            f"{int(inst.value('window_minutes'))} minutes: "
+                            f"{', '.join(sorted(touched))}. They share no "
+                            f"registration, address or trading name, so common "
+                            f"ownership does not explain the spread."
+                        ),
+                        feature={
+                            "feature_name": "unrelated_merchants_per_card_window",
+                            "merchant_value": float(len(touched)),
+                            "baseline_value": float(min_merchants),
+                            "deviation": float(len(touched) - min_merchants),
+                        },
+                        contributions=_linked_contributions(
+                            chain,
+                            {e.source_txn_id for e in window_events},
+                            "part of a same-card burst across merchants",
+                        ),
+                        linkage={
+                            "card_ref": refs.get(pan_key, "card"),
+                            "merchants": sorted(touched),
+                            "related": False,
+                            "window_minutes": int(inst.value("window_minutes")),
+                            "legs": [],
+                            "focus_txn_ids": sorted(
+                                e.source_txn_id for e in window_events
+                            ),
+                        },
+                    ),
                 )
+            )
             # One finding per card is enough; the analyst does not need the
             # same swarm reported once per sliding window position.
             break
@@ -385,7 +522,18 @@ def _card_swarm(data: RingInput, inst: RuleInstance) -> list[RingHit]:
 
 
 def _geo_velocity(data: RingInput, inst: RuleInstance) -> list[RingHit]:
-    """One card in two places the time between them does not allow."""
+    """One card in two places the time between them does not allow.
+
+    Reported once per card, not once per merchant per hop. A card that
+    ping-pongs between two districts all afternoon is one story, and the
+    previous shape told it once for each end of each leg — a dozen alerts
+    describing a single card.
+
+    The evidence is the arithmetic rather than the verdict: every impossible
+    leg carries its two places, the distance between their centroids, the
+    elapsed minutes, the implied speed, and how many times over the limit that
+    is. An analyst asked to accept "impossible" is owed the sum that says so.
+    """
     max_kmh = inst.value("max_kmh")
     min_km = inst.value("min_km")
     max_minutes = inst.value("max_minutes")
@@ -394,8 +542,17 @@ def _geo_velocity(data: RingInput, inst: RuleInstance) -> list[RingHit]:
         m.merchant_id: (m.subdistrict, m.district) for m in data.merchants
     }
 
+    def place_name(merchant_id: str) -> str:
+        sub, dist = places.get(merchant_id, (None, None))
+        return sub or dist or "unknown"
+
+    refs = _card_refs(data.card_events)
+
     hits: list[RingHit] = []
-    for chain in _by_card(data.card_events).values():
+    for pan_key, chain in _by_card(data.card_events).items():
+        legs: list[dict] = []
+        involved: dict[str, CardEvent] = {}
+
         for first, second in zip(chain, chain[1:]):
             if first.merchant_id == second.merchant_id:
                 continue
@@ -413,48 +570,84 @@ def _geo_velocity(data: RingInput, inst: RuleInstance) -> list[RingHit]:
             if kmh is None or kmh <= max_kmh:
                 continue
 
-            for event, other in ((first, second), (second, first)):
-                hits.append(
-                    RingHit(
-                        merchant_id=event.merchant_id,
-                        hit=RuleHit(
-                            rule_id=inst.instance_id,
-                            template=inst.template,
-                            label=inst.display_label(),
-                            reason_code=_reason_code(
-                                inst, max_kmh=max_kmh, min_km=min_km
-                            ),
-                            sub_score=min(kmh / (max_kmh * 4), 1.0),
-                            message=(
-                                f"The same card was used at {other.merchant_id} "
-                                f"{minutes:.0f} minutes "
-                                f"{'later' if event is first else 'earlier'}, "
-                                f"{km:.1f} km away — an implied "
-                                f"{kmh:.0f} km/h, above the "
-                                f"{max_kmh:.0f} km/h limit. Distance is between "
-                                f"subdistrict centroids and so understates the "
-                                f"real journey."
-                            ),
-                            feature={
-                                "feature_name": "implied_travel_speed_kmh",
-                                "merchant_value": round(kmh, 1),
-                                "baseline_value": max_kmh,
-                                "deviation": round(kmh / max_kmh, 2),
-                            },
-                            contributions=(
-                                Contribution(
-                                    source_txn_id=event.source_txn_id,
-                                    field="occurred_at",
-                                    value=event.occurred_at.isoformat(),
-                                    reason=(
-                                        f"{km:.1f} km from {other.merchant_id} "
-                                        f"in {minutes:.0f} minutes"
-                                    ),
-                                ),
-                            ),
-                        ),
-                    )
-                )
+            legs.append({
+                "from_merchant": first.merchant_id,
+                "from_place": place_name(first.merchant_id),
+                "from_txn_id": first.source_txn_id,
+                "from_time": first.occurred_at.isoformat(),
+                "to_merchant": second.merchant_id,
+                "to_place": place_name(second.merchant_id),
+                "to_txn_id": second.source_txn_id,
+                "to_time": second.occurred_at.isoformat(),
+                "distance_km": round(km, 2),
+                "minutes": round(minutes, 1),
+                "kmh": round(kmh, 1),
+                "limit_kmh": round(max_kmh, 1),
+                "over_limit_multiple": round(kmh / max_kmh, 2),
+            })
+            involved[first.source_txn_id] = first
+            involved[second.source_txn_id] = second
+
+        if not legs:
+            continue
+
+        worst = max(legs, key=lambda leg: leg["kmh"])
+        events = list(involved.values())
+        # The arrival end of the fastest leg carries the alert: that is the
+        # merchant that accepted a card which could not have been present.
+        carrier = worst["to_merchant"]
+        merchants = sorted({e.merchant_id for e in events})
+
+        hits.append(
+            RingHit(
+                merchant_id=carrier,
+                hit=RuleHit(
+                    rule_id=inst.instance_id,
+                    template=inst.template,
+                    label=inst.display_label(),
+                    reason_code=_reason_code(inst, max_kmh=max_kmh, min_km=min_km),
+                    sub_score=min(worst["kmh"] / (max_kmh * 4), 1.0),
+                    message=(
+                        f"One card ({refs.get(pan_key, 'card')}) was used at "
+                        f"{worst['from_merchant']} in {worst['from_place']} and "
+                        f"{worst['to_merchant']} in {worst['to_place']} "
+                        f"{worst['minutes']:.0f} minutes apart — "
+                        f"{worst['distance_km']:.1f} km, an implied "
+                        f"{worst['kmh']:.0f} km/h against a "
+                        f"{max_kmh:.0f} km/h limit "
+                        f"({worst['over_limit_multiple']:.1f}x over)."
+                        + (
+                            f" {len(legs)} legs of this card's day are impossible."
+                            if len(legs) > 1
+                            else ""
+                        )
+                        + " Distance is between subdistrict centroids and so "
+                        "understates the real journey."
+                    ),
+                    feature={
+                        "feature_name": "implied_travel_speed_kmh",
+                        "merchant_value": worst["kmh"],
+                        "baseline_value": max_kmh,
+                        "deviation": worst["over_limit_multiple"],
+                    },
+                    contributions=_linked_contributions(
+                        chain,
+                        set(involved),
+                        f"same card at {len(merchants)} merchants, at times the "
+                        f"journey between them does not allow",
+                    ),
+                    linkage={
+                        "card_ref": refs.get(pan_key, "card"),
+                        "merchants": merchants,
+                        "related": False,
+                        "legs": legs,
+                        # The transactions the accusation rests on, as against
+                        # the rest of the card's day that surrounds them.
+                        "focus_txn_ids": sorted(involved),
+                    },
+                ),
+            )
+        )
     return hits
 
 
