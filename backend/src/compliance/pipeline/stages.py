@@ -14,7 +14,12 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from compliance.detection.baselines import Baseline, DispersionMethod, score_value
+from compliance.detection.baselines import (
+    Baseline,
+    DispersionMethod,
+    PeerBaseline,
+    score_value,
+)
 from compliance.detection.evidence import Contribution
 from compliance.detection.profiles import (
     OriginMix,
@@ -59,7 +64,14 @@ from compliance.detection.typology import (
     evaluate as evaluate_typologies,
 )
 from compliance.glossary import alert_type_for
-from compliance.models import Alert, Disposition, Merchant, MerchantProfile, Transaction
+from compliance.models import (
+    Alert,
+    CohortSnapshot,
+    Disposition,
+    Merchant,
+    MerchantProfile,
+    Transaction,
+)
 from compliance.pipeline.merchant_study import merchant_level_is_comparable
 from compliance.rules_store import active_rules
 from compliance.settings_store import load_settings
@@ -256,7 +268,51 @@ def profile(session: Session, *, as_of: datetime) -> None:
                 },
             )
         )
+
+    _persist_cohorts(session, peers, as_of=as_of, window=(window_start, window_end))
     session.flush()
+
+
+def _persist_cohorts(
+    session: Session,
+    peers: dict[str, PeerBaseline],
+    *,
+    as_of: datetime,
+    window: tuple[datetime, datetime],
+) -> None:
+    """Keep each MCC cohort whole, so the case page can show it.
+
+    Written here rather than rebuilt on read because this is where the time
+    is: the run has the night, and an analyst opening a case has a moment.
+    Storing the fit also settles which cohort is the real one — the page now
+    shows the distribution the detector actually used, over the same window
+    and with the same days quarantined, instead of a fresh approximation of it.
+
+    Cleared first, for the same reason the profiles are: a run states the
+    current cohort, and leftovers from a prior one would sit alongside it.
+    """
+    for stale in session.scalars(select(CohortSnapshot)):
+        session.delete(stale)
+    session.flush()
+
+    window_start, window_end = window
+    for mcc, peer in peers.items():
+        session.add(
+            CohortSnapshot(
+                as_of=as_of,
+                mcc=mcc,
+                center=peer.center,
+                dispersion=peer.dispersion,
+                q1=peer.q1,
+                q3=peer.q3,
+                upper_fence=peer.upper_fence() if peer.usable else None,
+                n_merchants=peer.n_merchants,
+                usable=peer.usable,
+                members=list(peer.members),
+                window_start=window_start,
+                window_end=window_end,
+            )
+        )
 
 
 def route(session: Session) -> dict[str, str]:

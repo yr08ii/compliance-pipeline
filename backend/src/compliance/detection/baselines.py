@@ -86,6 +86,11 @@ class PeerBaseline:
     q3: float
     n_merchants: int
     n_observations: int
+    # The members themselves — one typical ticket each, ascending. Carried
+    # rather than discarded because the case page has to show the analyst the
+    # distribution, and a summary cannot be plotted. Reconstructing it later
+    # gave a different set of numbers than the one the fence was cut from.
+    members: tuple[float, ...] = ()
 
     @property
     def iqr(self) -> float:
@@ -186,8 +191,11 @@ def fit_peer_baseline(
         return PeerBaseline(0.0, 0.0, 0.0, 0.0, n_merchants, 0)
     center = median(centers)
     dispersion = max(median([abs(c - center) for c in centers]), min_dispersion)
-    q1, q3 = _quartiles(sorted(centers))
-    return PeerBaseline(center, dispersion, q1, q3, n_merchants, len(centers))
+    ordered = sorted(centers)
+    q1, q3 = _quartiles(ordered)
+    return PeerBaseline(
+        center, dispersion, q1, q3, n_merchants, len(centers), tuple(ordered)
+    )
 
 
 def detect_ramp(short_center: float, long_center: float, *, ratio: float = RAMP_RATIO) -> Trend:

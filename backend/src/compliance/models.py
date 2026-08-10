@@ -70,6 +70,46 @@ class MerchantProfile(Base):
     metrics: Mapped[dict] = mapped_column(JSON, default=dict)  # rolling windows
 
 
+class CohortSnapshot(Base):
+    """One MCC cohort's fitted amount distribution, kept whole.
+
+    The cohort is what several detectors judge a merchant against, so the case
+    page has to show it. Rebuilding it at read time meant a query per member
+    over their entire history, which was slow enough that the read path had
+    quietly capped itself at 200 members — an arbitrary subset of a cohort that
+    runs to hundreds, presented as the distribution.
+
+    Fitting happens once per run, where there is time to do it over every
+    member, and the members themselves are stored rather than only their
+    summary. Quartiles and the drawn points then come from one set of numbers,
+    so the plot cannot disagree with the fence drawn across it.
+
+    One row per cohort, not per merchant: the member list is shared by every
+    merchant in the MCC, and copying it onto each profile would multiply it by
+    the size of the cohort.
+    """
+
+    __tablename__ = "cohort_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    mcc: Mapped[str] = mapped_column(String, index=True)
+    center: Mapped[float] = mapped_column(Float)
+    dispersion: Mapped[float] = mapped_column(Float)
+    q1: Mapped[float] = mapped_column(Float)
+    q3: Mapped[float] = mapped_column(Float)
+    upper_fence: Mapped[float | None] = mapped_column(Float, default=None)
+    n_merchants: Mapped[int] = mapped_column(Integer, default=0)
+    usable: Mapped[bool] = mapped_column(Boolean, default=False)
+    # One typical ticket per member, ascending. The distribution itself.
+    members: Mapped[list] = mapped_column(JSON, default=list)
+    window_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    window_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+
+
 class Alert(Base):
     __tablename__ = "alerts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

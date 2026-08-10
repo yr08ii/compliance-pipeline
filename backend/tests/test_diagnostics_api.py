@@ -12,7 +12,14 @@ from sqlalchemy.pool import StaticPool
 
 from compliance.api import create_app
 from compliance.db import get_session
-from compliance.models import Alert, Base, Merchant, MerchantProfile, Transaction
+from compliance.models import (
+    Alert,
+    Base,
+    CohortSnapshot,
+    Merchant,
+    MerchantProfile,
+    Transaction,
+)
 
 AS_OF = datetime(2026, 5, 1, tzinfo=timezone(timedelta(hours=8)))
 SCORED_DAY = AS_OF - timedelta(days=1)  # 2026-04-30
@@ -126,6 +133,23 @@ def client():
                     "foreign_usable": True,
                     "subdistrict": "Tsim sha tsui",
                 },
+            )
+        )
+
+        # The cohort as the run fitted it. The case page plots this rather than
+        # rebuilding it, so the fixture has to carry it like a real run would.
+        s.add(
+            CohortSnapshot(
+                as_of=AS_OF,
+                mcc="5411",
+                center=115.0,
+                dispersion=18.0,
+                q1=104.0,
+                q3=128.0,
+                upper_fence=155.0,
+                n_merchants=5,
+                usable=True,
+                members=[98.0, 104.0, 115.0, 128.0, 141.0],
             )
         )
         s.add(
