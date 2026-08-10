@@ -226,6 +226,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Rules
+         * @description The Family B and C rule set, with the catalogue behind it.
+         *
+         *     The templates ship alongside the instances so the tuning screen renders
+         *     its controls from the backend's declaration rather than a duplicated
+         *     list in the frontend — a rule cannot then gain a parameter that the UI
+         *     has no way to reach.
+         */
+        get: operations["read_rules_api_rules_get"];
+        /**
+         * Write Rules
+         * @description Replace the rule set.
+         *
+         *     Takes effect on the next pipeline run. Rejected as a whole if any
+         *     instance is invalid: a partial save would leave the officer believing
+         *     they had configured something they had not.
+         */
+        put: operations["write_rules_api_rules_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts/{alert_id}": {
         parameters: {
             query?: never;
@@ -256,6 +289,33 @@ export interface paths {
          *     behind them, and the curves needed to plot the distributions.
          */
         get: operations["get_diagnostics_api_alerts__alert_id__diagnostics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alerts/{alert_id}/linked-transactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Linked Transactions
+         * @description The same card's activity across every merchant a ring alert names.
+         *
+         *     Separate from the day ledger because it answers a different question.
+         *     The ledger shows one merchant's day; a card-linkage finding is a claim
+         *     about several merchants at once, and its evidence is unreadable when
+         *     half of it sits behind another merchant's page.
+         *
+         *     Empty for alerts with no card-linkage finding, which is most of them.
+         */
+        get: operations["get_linked_transactions_api_alerts__alert_id__linked_transactions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -419,6 +479,45 @@ export interface components {
             /** Quarantined Days */
             quarantined_days: number | null;
         };
+        /**
+         * CardLink
+         * @description One card-linkage finding, across every merchant it touched.
+         */
+        CardLink: {
+            /** Detector */
+            detector: string;
+            /** Label */
+            label: string;
+            /** Card Ref */
+            card_ref: string;
+            /** Related */
+            related: boolean;
+            /** Merchants */
+            merchants: string[];
+            /** Legs */
+            legs: components["schemas"]["GeoLeg"][];
+            /** Transactions */
+            transactions: components["schemas"]["LinkedRow"][];
+            /**
+             * Trail
+             * @default []
+             */
+            trail: components["schemas"]["TrailMerchant"][];
+            /** First Seen */
+            first_seen?: string | null;
+            /** Last Seen */
+            last_seen?: string | null;
+            /**
+             * Total Amount
+             * @default 0
+             */
+            total_amount: number;
+            /**
+             * Rails
+             * @default []
+             */
+            rails: string[];
+        };
         /** CaseDetail */
         CaseDetail: {
             /** Disposition Id */
@@ -547,6 +646,21 @@ export interface components {
             detector: string;
             /** Sub Score */
             sub_score: number;
+            /** Rule Id */
+            rule_id?: string | null;
+            /** Reason Code */
+            reason_code?: string | null;
+            /** Message */
+            message?: string | null;
+            /**
+             * Contributions
+             * @default []
+             */
+            contributions: components["schemas"]["TxnContribution"][];
+            /** Linkage */
+            linkage?: {
+                [key: string]: unknown;
+            } | null;
         };
         /**
          * DetectorVerdict
@@ -576,6 +690,16 @@ export interface components {
             band: string | null;
             /** Message */
             message: string;
+            /**
+             * Family
+             * @default A
+             */
+            family: string;
+            /**
+             * Contributions
+             * @default []
+             */
+            contributions: components["schemas"]["TxnContribution"][];
         };
         /** Diagnostics */
         Diagnostics: {
@@ -652,6 +776,42 @@ export interface components {
             baseline_value: number;
             /** Deviation */
             deviation: number;
+        };
+        /**
+         * GeoLeg
+         * @description One hop a card made, and the arithmetic that calls it impossible.
+         *
+         *     Every term is shown rather than a verdict. An analyst asked to accept that
+         *     a cardholder could not have made a journey is owed the distance, the
+         *     elapsed time, the speed those imply, and the limit being compared against.
+         */
+        GeoLeg: {
+            /** From Merchant */
+            from_merchant: string;
+            /** From Place */
+            from_place: string;
+            /** From Txn Id */
+            from_txn_id: string;
+            /** From Time */
+            from_time: string;
+            /** To Merchant */
+            to_merchant: string;
+            /** To Place */
+            to_place: string;
+            /** To Txn Id */
+            to_txn_id: string;
+            /** To Time */
+            to_time: string;
+            /** Distance Km */
+            distance_km: number;
+            /** Minutes */
+            minutes: number;
+            /** Kmh */
+            kmh: number;
+            /** Limit Kmh */
+            limit_kmh: number;
+            /** Over Limit Multiple */
+            over_limit_multiple: number;
         };
         /**
          * Glossary
@@ -752,6 +912,61 @@ export interface components {
             is_outlier: boolean;
         };
         /**
+         * LinkedRow
+         * @description One transaction of a linked card, at whichever merchant took it.
+         *
+         *     No PAN hash, here least of all: this view exists precisely because several
+         *     merchants are involved, and the card that connects them is the one thing
+         *     that must not travel with the evidence.
+         */
+        LinkedRow: {
+            /** Source Txn Id */
+            source_txn_id: string;
+            /** Merchant Id */
+            merchant_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            /** Total Amount */
+            total_amount: number;
+            /** Card Type */
+            card_type: string | null;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** Merchant District */
+            merchant_district: string | null;
+            /** Merchant Subdistrict */
+            merchant_subdistrict: string | null;
+            /** Is Alert Merchant */
+            is_alert_merchant: boolean;
+            /** Owner Group */
+            owner_group: string | null;
+            /** Minutes Since Previous */
+            minutes_since_previous: number | null;
+            /**
+             * Is Focus
+             * @default false
+             */
+            is_focus: boolean;
+            /** Arrived At Kmh */
+            arrived_at_kmh?: number | null;
+            /** Arrived From Km */
+            arrived_from_km?: number | null;
+        };
+        /** LinkedTransactions */
+        LinkedTransactions: {
+            /** Alert Id */
+            alert_id: number;
+            /** Merchant Id */
+            merchant_id: string;
+            /** Links */
+            links: components["schemas"]["CardLink"][];
+        };
+        /**
          * PeerDistribution
          * @description Where this merchant sits against its cohort, for the box plot.
          */
@@ -773,6 +988,90 @@ export interface components {
             /** Peer Values */
             peer_values: number[];
         };
+        /** RuleInstanceIn */
+        RuleInstanceIn: {
+            /** Instance Id */
+            instance_id: string;
+            /** Template */
+            template: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Params
+             * @default {}
+             */
+            params: {
+                [key: string]: number;
+            };
+            /**
+             * Mcc Scope
+             * @default []
+             */
+            mcc_scope: string[];
+            /**
+             * Custom
+             * @default false
+             */
+            custom: boolean;
+            /** Label */
+            label?: string | null;
+        };
+        /**
+         * RuleParam
+         * @description One tunable number on a rule, with the bounds it must stay inside.
+         */
+        RuleParam: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Kind */
+            kind: string;
+            /** Default */
+            default: number;
+            /** Minimum */
+            minimum: number;
+            /** Maximum */
+            maximum: number;
+            /** Step */
+            step: number;
+            /** Hint */
+            hint: string;
+        };
+        /**
+         * RuleSet
+         * @description The configured rules, alongside the catalogue they instantiate.
+         */
+        RuleSet: {
+            /** Templates */
+            templates: components["schemas"]["RuleTemplateOut"][];
+            /** Instances */
+            instances: components["schemas"]["RuleInstanceIn"][];
+        };
+        /**
+         * RuleTemplateOut
+         * @description A rule the engine can evaluate, and everything the tuning screen needs
+         *     to render controls for it without hard-coding anything.
+         */
+        RuleTemplateOut: {
+            /** Key */
+            key: string;
+            /** Family */
+            family: string;
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Rationale */
+            rationale: string;
+            /** Scopable */
+            scopable: boolean;
+            /** Params */
+            params: components["schemas"]["RuleParam"][];
+        };
         /** StatBlock */
         StatBlock: {
             /** Mean */
@@ -793,6 +1092,62 @@ export interface components {
             modified_z: number | null;
             /** Method */
             method: string;
+        };
+        /**
+         * TrailMerchant
+         * @description One merchant on a card's trail, summarised.
+         *
+         *     The header of a card-linkage case is a list of merchants, not one
+         *     merchant — so the merchants need enough with them to be read at a glance
+         *     without opening each.
+         */
+        TrailMerchant: {
+            /** Merchant Id */
+            merchant_id: string;
+            /** Mcc */
+            mcc: string | null;
+            /** Mcc Description */
+            mcc_description: string | null;
+            /** District */
+            district: string | null;
+            /** Subdistrict */
+            subdistrict: string | null;
+            /** Owner Group */
+            owner_group: string | null;
+            /** Is Alert Merchant */
+            is_alert_merchant: boolean;
+            /** Transactions */
+            transactions: number;
+            /** Total Amount */
+            total_amount: number;
+            /**
+             * First Seen
+             * Format: date-time
+             */
+            first_seen: string;
+            /**
+             * Last Seen
+             * Format: date-time
+             */
+            last_seen: string;
+        };
+        /**
+         * TxnContribution
+         * @description One transaction's part in one detector firing.
+         *
+         *     `field` names the source column that carries the cause, so the ledger can
+         *     highlight that cell rather than leaving the analyst to guess which
+         *     property of a highlighted row was the problem.
+         */
+        TxnContribution: {
+            /** Source Txn Id */
+            source_txn_id: string;
+            /** Field */
+            field: string;
+            /** Value */
+            value: string;
+            /** Reason */
+            reason: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -1126,6 +1481,61 @@ export interface operations {
             };
         };
     };
+    read_rules_api_rules_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleSet"];
+                };
+            };
+        };
+    };
+    write_rules_api_rules_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleSet"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_alert_api_alerts__alert_id__get: {
         parameters: {
             query?: never;
@@ -1175,6 +1585,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Diagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_linked_transactions_api_alerts__alert_id__linked_transactions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                alert_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LinkedTransactions"];
                 };
             };
             /** @description Validation Error */

@@ -235,11 +235,35 @@ class TestLedger:
 
 class TestDiagnostics:
     def test_returns_every_detector_with_a_verdict(self, client):
-        body = client.get("/api/alerts/1/diagnostics").json()
+        """Every Family A baseline and every enabled Family B rule reports,
+        whether it fired or not. A rule that stayed silent is information: it
+        says structuring was checked for and not found, which is not the same
+        as nobody having looked."""
+        from compliance.detection.ruleset import Family, default_instances
 
-        assert len(body["detectors"]) == 12
+        body = client.get("/api/alerts/1/diagnostics").json()
+        families = [d["family"] for d in body["detectors"]]
+
+        assert families.count("A") == 12
+        assert families.count("B") == len(default_instances(Family.B))
         assert {d["status"] for d in body["detectors"]} <= {"OK", "FAIL", "SKIP"}
         assert any(d["status"] == "FAIL" for d in body["detectors"])
+
+    def test_detectors_carry_the_transactions_that_drove_them(self, client):
+        """The feedback's core ask: an amount alert must name the transaction,
+        not just report that the day was anomalous."""
+        body = client.get("/api/alerts/1/diagnostics").json()
+        amount = next(
+            d for d in body["detectors"] if d["detector"] == "amount_vs_own_baseline"
+        )
+
+        assert amount["status"] == "FAIL"
+        assert amount["contributions"], "amount alert named no transaction"
+        # And it must say which column carried the cause, so the ledger can
+        # highlight that cell rather than the whole row.
+        assert {c["field"] for c in amount["contributions"]} == {"total_amount"}
+        assert all(c["source_txn_id"] for c in amount["contributions"])
+        assert all(c["reason"] for c in amount["contributions"])
 
     def test_each_detector_explains_itself(self, client):
         body = client.get("/api/alerts/1/diagnostics").json()

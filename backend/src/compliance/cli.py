@@ -197,7 +197,13 @@ def upload_main() -> None:
     """
     from compliance.csv_ingest import iter_csv_rows, validate_csv
     from compliance.db import SessionLocal
-    from compliance.ingest import _parse_time, _MERCHANT_FIELDS, _TXN_FIELDS, REFUND_STATUSES
+    from compliance.ingest import (
+        _parse_time,
+        _text,
+        _MERCHANT_FIELDS,
+        _TXN_FIELDS,
+        REFUND_STATUSES,
+    )
     from compliance.models import Merchant, Transaction
     from sqlalchemy import select, text
 
@@ -303,8 +309,9 @@ def upload_main() -> None:
             else:
                 merchant = known_merchants[merchant_id]
             for field in _MERCHANT_FIELDS:
-                if row.get(field) is not None:
-                    setattr(merchant, field, str(row[field]))
+                value = _text(row.get(field))
+                if value is not None:
+                    setattr(merchant, field, value)
             touched.add(merchant_id)
 
             total = float(row["total_amount"])
@@ -328,9 +335,12 @@ def upload_main() -> None:
                 "transaction_status": None,
                 "hashed_pan": None,
             }
+            # `_text` folds blank to NULL. The CSV writes `hashed_pan=""` on
+            # every wallet rail, and an empty string compares equal to every
+            # other empty string — which is how one "card" ends up at thousands
+            # of merchants. See `ingest._text`.
             for field in _TXN_FIELDS:
-                if row.get(field) is not None:
-                    txn_values[field] = str(row[field])
+                txn_values[field] = _text(row.get(field))
             txn_batch.append(txn_values)
 
             # Commit in batches

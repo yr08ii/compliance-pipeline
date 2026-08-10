@@ -2,9 +2,33 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class TxnContribution(BaseModel):
+    """One transaction's part in one detector firing.
+
+    `field` names the source column that carries the cause, so the ledger can
+    highlight that cell rather than leaving the analyst to guess which
+    property of a highlighted row was the problem."""
+
+    source_txn_id: str
+    field: str
+    value: str
+    reason: str
+
+
 class DetectorHit(BaseModel):
     detector: str
     sub_score: float
+    # Set for Family B and C, whose findings are rule matches. `reason_code`
+    # carries the parameters in force when it fired, so it still explains
+    # itself after the rule is retuned.
+    rule_id: str | None = None
+    reason_code: str | None = None
+    message: str | None = None
+    contributions: list[TxnContribution] = []
+    # Family C only: which merchants one card connected, and the journey
+    # between them. A ring finding is about several merchants at once, and
+    # neither the feature row nor the contribution list can say that.
+    linkage: dict | None = None
 
 
 class FeatureDivergence(BaseModel):
@@ -122,6 +146,114 @@ class Ledger(BaseModel):
     transactions: list[LedgerRow]
 
 
+class GeoLeg(BaseModel):
+    """One hop a card made, and the arithmetic that calls it impossible.
+
+    Every term is shown rather than a verdict. An analyst asked to accept that
+    a cardholder could not have made a journey is owed the distance, the
+    elapsed time, the speed those imply, and the limit being compared against.
+    """
+
+    from_merchant: str
+    from_place: str
+    from_txn_id: str
+    from_time: str
+    to_merchant: str
+    to_place: str
+    to_txn_id: str
+    to_time: str
+    # Between subdistrict centroids, so a lower bound on the real journey —
+    # which makes the implied speed a lower bound too.
+    distance_km: float
+    minutes: float
+    kmh: float
+    limit_kmh: float
+    over_limit_multiple: float
+
+
+class LinkedRow(BaseModel):
+    """One transaction of a linked card, at whichever merchant took it.
+
+    No PAN hash, here least of all: this view exists precisely because several
+    merchants are involved, and the card that connects them is the one thing
+    that must not travel with the evidence."""
+
+    source_txn_id: str
+    merchant_id: str
+    occurred_at: datetime
+    total_amount: float
+    card_type: str | None
+    mcc: str | None
+    mcc_description: str | None
+    merchant_district: str | None
+    merchant_subdistrict: str | None
+    # Whether this row is at the merchant whose queue the alert sits in.
+    is_alert_merchant: bool
+    # Set when this merchant shares a registration, address or trading name
+    # with another in the list — branches of one chain rather than separate
+    # shops, which is what the finding turns on.
+    owner_group: str | None
+    # Gap from the previous transaction of the same card. The column the
+    # impossible-travel claim actually rests on.
+    minutes_since_previous: float | None
+    # Whether the rule fired on this transaction, as against it being the rest
+    # of the card's day shown around it for context.
+    is_focus: bool = False
+    # Set where this transaction is the arrival end of an impossible leg, so
+    # the speed sits on the row it condemns.
+    arrived_at_kmh: float | None = None
+    arrived_from_km: float | None = None
+
+
+class TrailMerchant(BaseModel):
+    """One merchant on a card's trail, summarised.
+
+    The header of a card-linkage case is a list of merchants, not one
+    merchant — so the merchants need enough with them to be read at a glance
+    without opening each."""
+
+    merchant_id: str
+    mcc: str | None
+    mcc_description: str | None
+    district: str | None
+    subdistrict: str | None
+    owner_group: str | None
+    is_alert_merchant: bool
+    transactions: int
+    total_amount: float
+    first_seen: datetime
+    last_seen: datetime
+
+
+class CardLink(BaseModel):
+    """One card-linkage finding, across every merchant it touched."""
+
+    detector: str
+    label: str
+    # A per-run display label ("card 1"). Not derived from the card hash — a
+    # position in a sort order carries no information about the card.
+    card_ref: str
+    related: bool
+    merchants: list[str]
+    legs: list[GeoLeg]
+    transactions: list[LinkedRow]
+    # The trail rolled up per merchant, for the case header. A card-linkage
+    # case is about the card, so its header has to describe the card: where it
+    # went, when, and for how much.
+    trail: list[TrailMerchant] = []
+    # Span and totals of the whole trail.
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    total_amount: float = 0.0
+    rails: list[str] = []
+
+
+class LinkedTransactions(BaseModel):
+    alert_id: int
+    merchant_id: str
+    links: list[CardLink]
+
+
 class DetectorVerdict(BaseModel):
     """One detector's result, whether it fired or not. Showing the passes
     matters as much as the failures: it tells the analyst what was ruled out."""
@@ -137,6 +269,10 @@ class DetectorVerdict(BaseModel):
     deviation: float | None
     band: str | None
     message: str
+    # "A" robust baselines, "B" typology rules, "C" ring detection. The panel
+    # groups by this because the three call for different follow-up.
+    family: str = "A"
+    contributions: list[TxnContribution] = []
 
 
 class StatBlock(BaseModel):
@@ -265,6 +401,49 @@ class CaseDetail(CaseSummary):
     analyst_id: str
     scored_date: str | None
     events: list[CaseEventOut]
+
+
+class RuleParam(BaseModel):
+    """One tunable number on a rule, with the bounds it must stay inside."""
+
+    key: str
+    label: str
+    kind: str
+    default: float
+    minimum: float
+    maximum: float
+    step: float
+    hint: str
+
+
+class RuleTemplateOut(BaseModel):
+    """A rule the engine can evaluate, and everything the tuning screen needs
+    to render controls for it without hard-coding anything."""
+
+    key: str
+    family: str
+    label: str
+    description: str
+    rationale: str
+    scopable: bool
+    params: list[RuleParam]
+
+
+class RuleInstanceIn(BaseModel):
+    instance_id: str = Field(min_length=1)
+    template: str = Field(min_length=1)
+    enabled: bool = True
+    params: dict[str, float] = {}
+    mcc_scope: list[str] = []
+    custom: bool = False
+    label: str | None = None
+
+
+class RuleSet(BaseModel):
+    """The configured rules, alongside the catalogue they instantiate."""
+
+    templates: list[RuleTemplateOut]
+    instances: list[RuleInstanceIn]
 
 
 class Page(BaseModel):

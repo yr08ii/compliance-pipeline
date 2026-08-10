@@ -22,11 +22,13 @@ flowchart TD
     ROUTE -->|"mature: count AND days over threshold"| LANEA["Lane A · mature merchant"]
     ROUTE -->|"new / low-data"| LANEB["Lane B · cold start"]
 
-    LANEA --> FA["Family A<br/>amount · volume · speed<br/>own + peer"]
+    LANEA --> FA["Family A<br/>amount · volume · speed · rail<br/>own + peer"]
     LANEA --> FB["Family B<br/>Typology ruleset"]
     LANEB --> FBP["Cohort tests + MCC caps<br/>no own baseline to score against"]
+    LANEB --> FB
 
-    FC["Family C<br/>Ring detection<br/>portfolio-wide, not per-lane"]
+    FA --> FC["Family C<br/>Ring detection<br/>portfolio-wide, runs last:<br/>reads what A and B found"]
+    FB --> FC
 
     FA --> SCORE["Stage 5 · Composite score<br/>normalize, blend, carry reasons"]
     FB --> SCORE
@@ -47,6 +49,8 @@ flowchart TD
 ```
 
 **Read it as:** one fork (mature vs new), three detector families feeding one score, one human decision, two feedback loops back into the machine.
+
+Two things the fork does *not* gate. **Family B runs in both lanes** — a rule needs no fitted history, which is exactly why the cold-start merchants Family A cannot score are the ones the typology ruleset exists to cover. **Family C runs across the portfolio and last**, because a ring's severity depends on how many of its members the other two families just flagged.
 
 ---
 
@@ -75,7 +79,7 @@ flowchart TD
 
 ## 3. Zoom · Family A — robust baselines
 
-Answers: *"is this unusual for this merchant, for its trade, or for where it trades?"* Twelve detectors across three frames of reference — the merchant's own history, its MCC cohort, and its district. Every one is natively explainable — each emits a `feature_snapshot` row the divergence panel renders, and all report the same modified z-score so they are comparable.
+Answers: *"is this unusual for this merchant, for its trade, or for where it trades?"* Thirteen detectors across three frames of reference — the merchant's own history, its MCC cohort, and its district. Every one is natively explainable: each emits a `feature_snapshot` row the divergence panel renders, all report the same modified z-score so they are comparable, and each **names the transactions it fired on** and the column of each that carries the cause (§3f).
 
 ```mermaid
 flowchart TD
@@ -86,6 +90,7 @@ flowchart TD
         A4["Trend<br/>7d level vs 90d level"]
         A5["When<br/>hour vs own pattern"]
         A6["Whose cards<br/>origin vs own mix"]
+        A7["Amount per rail<br/>ticket vs own median ON THAT RAIL"]
     end
 
     subgraph PEER["Cohort · unusual FOR THIS TRADE, or FOR THIS PLACE?"]
@@ -101,6 +106,64 @@ flowchart TD
     PEER --> SNAP
     SNAP --> PANEL["Divergence panel"]
 ```
+
+### 3f. Payment-method baselines — why the rail is its own frame
+
+A merchant's amount baseline pooled across every payment rail has a spread wide enough to swallow the rail that most needed watching. Octopus is a stored-value card for transit and small retail, so HKD 3,000 on it is remarkable; the same amount on Visa is unremarkable. Pooled, the Visa tail sets the dispersion and the Octopus outlier sits comfortably inside it.
+
+So each merchant is fitted **once per `card_type`**, using the same median/MAD machinery, and a rail the merchant barely uses comes back unusable rather than fitted — a merchant taking Alipay twice a month has no Alipay pattern to be judged against.
+
+### 3g. Materiality — statistical significance is not practical significance
+
+A HKD 150 transaction can be a genuine four-sigma outlier at a convenience store and be worthless to a launderer. Firing on the z-score alone buried the actionable alerts under thousands of those, so an amount comparison must clear **both** the outlier threshold *and* an absolute floor (`materiality_floor`, default HKD 1,000).
+
+The floor applies to amount comparisons only. A burst of small transactions or trading at 3am is not made harmless by being small — small and frequent is the shape of structuring.
+
+### 3h. Every threshold is tunable without a deploy
+
+`outlier_z`, `moderate_z`, `materiality_floor`, the maturity thresholds, the window and the lag all live in the database, with optional per-MCC overrides — a jeweller's tickets are lumpy where a grocer's are not, and one global threshold either floods the volatile trades or goes blind on the steady ones. Changes apply to the **next run**, never retroactively: existing alerts were judged under the thresholds in force at the time, and rewriting that would break the audit trail.
+
+### 3i. When the merchant-level peer test may run
+
+"Is this *merchant* unusual for its cohort?" compares one **level** against another, so both levels have to exist. Three conditions, in one predicate — `merchant_study.merchant_level_is_comparable` — read by the nightly pipeline deciding whether to fire *and* by the case page explaining the result:
+
+| Condition | Why |
+|---|---|
+| A usable MCC peer cohort | nothing to compare against otherwise |
+| A usable baseline of the merchant's **own** | the median of two transactions is always defined and is not a level |
+| Trade on the scored day | the baseline window is lagged and does not move overnight, so a silent merchant would produce the identical alert every night until somebody dispositioned it |
+
+> **Why it is one predicate and not two copies.** The pipeline and the case page each held their own version and they drifted: the pipeline fired on a cohort plus any `baseline_center`, the page additionally demanded `baseline_usable`. The queue then carried alerts headed *"Merchant level vs MCC baseline"* whose own detail panel reported **0 fired · 2 passed · 10 skipped**, with the reason *"Skipped (MCC peer merchant baseline not usable)"* — the evidence page denying what the queue asserted. Every merchant in the "limited history" group produced one. `tests/test_alert_is_explainable.py` now asserts the invariant directly: no alert may open to zero fired.
+
+### 3j. Ranking a temporal anomaly
+
+Both timing detectors (own pattern, MCC cohort hours) once reported a flat `sub_score` of **0.5**. Rank decides which case an analyst opens first, so a constant left every temporal alert tied with every other and ordered by whatever the tie-break happened to be — one transaction at 03:00 sorting alongside four hundred of them.
+
+`timedensity.temporal_severity` scores three inputs, bounded to [0, 1] so the result stays comparable with the z-score detectors it is ranked against:
+
+| Input | Weight | What it separates |
+|---|---|---|
+| Count of off-hours transactions (log-saturating at 100) | 0.55 | a stray late sale from a night's trading |
+| Their share of the day | 0.30 | a merchant operating at the wrong time from a late closer |
+| How far below the merchant's own cutoff the worst one sat | 0.15 | an hour never traded from the quiet edge of the evening |
+
+Depth is measured against **the merchant's own threshold** rather than an absolute density, because densities are not comparable between merchants: a round-the-clock forecourt's busiest hour is thinner than a boutique's quietest.
+
+### 3k. Naming the evidence
+
+A deviation with no way back to the rows that caused it leaves the analyst scanning the ledger by hand. Every detector therefore records, alongside its score, the transactions that drove it and the **source column** of each that carries the cause:
+
+| Detector | Transactions named | Field highlighted |
+|---|---|---|
+| Amount (own / rail / MCC / subdistrict) | those breaching the threshold | `total_amount` |
+| Volume (own / MCC) | the whole day — every transaction is the evidence | `occurred_at` |
+| Speed | only those inside the busiest hour | `occurred_at` |
+| Hour (own / MCC) | those at an unusual time | `occurred_at` |
+| Card origin | those on a surprising issuing country | `card_issuing_country` |
+| Foreign-card share | the overseas-issued ones | `card_issuing_country` |
+| Merchant level vs MCC, trend | **none** — the merchant, not any transaction, is the subject | — |
+
+Silence is meaningful: an empty set says "no transaction is the reason", which is different from "we did not look". The evidence is **frozen onto the alert** rather than recomputed on read, for the same reason `feature_snapshot` is — a later run with retuned thresholds would otherwise rewrite what the analyst was shown.
 
 ### 3a. Three measured quantities, and why all three
 
@@ -204,6 +267,40 @@ flowchart TD
 
 R6 is the *transaction-laundering* signature — a registered business fronting a different, hidden one. R7 is the in-scope, merchant-side read of card testing (we measure the merchant's decline rate; we do not chase stolen cards).
 
+### 4a. The exact test behind each rule
+
+Each rule is a named test with explicit numeric parameters, not a description. Every number below is a **shipped default** and every one is tunable per instance; the reason code on an alert carries the parameters that were in force, so it still explains itself after a retune.
+
+| Rule | Fires when | Parameters (default) |
+|---|---|---|
+| **Structuring** | ≥ `min_count` settled transactions in one day fall in the band `[threshold × (1 − band), threshold)`, **and** the merchant's own median ticket is below `threshold × max_baseline_ratio` | threshold HKD 8,000 · band 15% · min_count 3 · max_baseline_ratio 0.5 |
+| **Refund abuse** | ≥ `min_refunds` refunds in the day **and** refunded value ÷ gross settled value ≥ `ratio` | min_refunds 3 · ratio 30% |
+| **Bust-out** | median daily value over the last `recent_days` ≥ `spike_ratio` × the median over the earlier window, **and** the scored day's refund share ≥ `refund_ratio` | spike_ratio 3.0 · recent_days 7 · refund_ratio 10% |
+| **Dormant reactivation** | gap since last activity ≥ `silence_days` **and** ≥ `return_count` settled transactions on the return day | silence_days 45 · return_count 10 |
+| **Rapid movement** | gross ≥ `min_value` **and** \|gross − refunded\| ÷ gross ≤ `match_tolerance` | min_value HKD 20,000 · tolerance 10% |
+| **Declared vs actual** | own median ticket ≥ `ticket_ratio` × the MCC cohort's median, **and** the share of the day's transactions falling inside the cohort's active hours < `hours_overlap` | ticket_ratio 4.0 · hours_overlap 25% |
+| **Decline spike** | ≥ `min_attempts` authorisation attempts **and** declined ÷ attempts ≥ `ratio` | min_attempts 20 · ratio 25% |
+
+**Why each rule carries a second condition.** Every one of these has a guard that stops it firing on ordinary trade, and each guard is the difference between a usable rule and a queue-flooder:
+
+- Structuring without the baseline guard fires every day on any jeweller whose ordinary sale is near the line.
+- Refund abuse without a minimum count fires on a single return.
+- Bust-out without the refund leg fires on every merchant that grows.
+- Dormancy without a volume test fires on any shop that reopens after a holiday.
+- Declared-vs-actual without the hours leg fires on a merchant that is merely expensive for its trade, which is legal.
+- Decline spike without a minimum attempt count turns three declines out of four into a 75% rate.
+
+**Statuses, precisely.** `DECLINED` is an attempted-and-refused authorisation: it moves no money, so it never counts as value taken, and it is the numerator of the decline ratio. `CANCELLED` / `VOIDED` are attempts that did not complete for another reason — counted in the decline ratio's denominator, never as value. `REFUNDED` / `REVERSED` / `CHARGEBACK` moved value back out: excluded from the amount baselines, and the basis of the refund rules. Refunds are deliberately **not** in the decline ratio's denominator, or a heavy refund day would dilute the ratio and hide a card-testing run.
+
+### 4b. Where the rules live, and who owns them
+
+Rules are declared as **templates with typed parameters**, stored as data, not as constants in code. Two consequences:
+
+- The tuning screen renders its controls from the template, so a rule cannot ship with a parameter that the UI has no way to reach.
+- A compliance officer can add *their own* rule by instantiating a template with different parameters and an MCC scope — "structuring, but HKD 100,000 and only for jewellers" — running alongside the portfolio-wide instance. No deploy.
+
+**What is deliberately not offered is a free-text expression language.** Analyst-authored predicates evaluated at runtime would be an arbitrary code path into the detection engine, and an AML rule nobody can statically review is not auditable. Templates keep every alert explainable by construction.
+
 ---
 
 ## 5. Zoom · Family C — ring detection
@@ -223,23 +320,96 @@ flowchart TD
         M4 --> RING
     end
 
-    subgraph S["5.2 Card-linkage · GATED, BUILD LAST"]
+    subgraph S["5.2 Card-linkage · GATED"]
         C1["hashed_pan across merchants<br/>card swarming"]
-        C2["Cross-merchant structuring"]
+        C2["One card across related merchants<br/>branch structuring"]
+        C3["Impossible geo-velocity"]
         C1 --> CARD["Card-linkage signal"]
         C2 --> CARD
+        C3 --> CARD
     end
 
     subgraph O["5.3 Out of scope · cardholder fraud"]
-        O1["Impossible geo-velocity"]
-        O2["BIN / card testing"]
+        O2["BIN / card testing<br/>merchant-side read is Family B R7"]
     end
 
     RING --> SCORE["Composite score"]
     CARD -.->|"only after HMAC key +<br/>PCI and PDPO sign-off"| SCORE
-    O1 -.-> FRAUD["Fraud team<br/>integration point, not built here"]
-    O2 -.-> FRAUD
+    O2 -.-> FRAUD["Fraud team<br/>integration point, not built here"]
 ```
+
+### 5.4 The exact test behind each ring rule
+
+| Rule | Fires when | Parameters (default) |
+|---|---|---|
+| **Shared merchant identity** | ≥ `min_members` distinct `merchant_id`s share one `hashed_br_number`, `hashed_merchant_address`, or `hashed_merchant_name`, **and** ≥ `min_flagged` of them already carry an open alert | min_members 3 · min_flagged 1 |
+| **Agent concentration** | an `agent_id` with ≥ `min_merchants` in its book alerts at ≥ `rate_multiple` × the portfolio-wide alert rate | min_merchants 5 · rate_multiple 3.0 |
+| **One card across related merchants** | one `hashed_pan` appears at **more than** `max_branches` distinct `merchant_id`s sharing an identity hash, within one HK calendar day | max_branches 3 |
+| **Card swarming** | one `hashed_pan` appears at ≥ `min_merchants` **unrelated** merchants inside `window_minutes` | min_merchants 5 · window 120 min |
+| **Impossible geo-velocity** | two consecutive transactions of one `hashed_pan` at different merchants imply > `max_kmh`, where distance ≥ `min_km` and the gap ≤ `max_minutes` | max_kmh 60 · min_km 3.0 · max_minutes 240 |
+
+**Grouping is per attribute, not transitive.** "These four share a business registration" is a specific, checkable claim. A blob joined transitively through three different attributes is not something an analyst can act on. A null hash never links anything — merchants with no registration on file would otherwise all group under the shared value `None`, the largest false ring possible.
+
+**"Already flagged" spans two things**: merchants carrying an alert nobody has cleared, and merchants Family A or B flagged earlier in the same run. Alerts are not written until the final stage, so reading the table alone leaves a first run seeing nothing flagged and every ring silently below threshold. A merchant dispositioned `FALSE_POSITIVE` drops out rather than inflating its ring's severity forever.
+
+**One card raises one alert.** The three card-linkage rules each report **once per card**, attributed to a single merchant, naming the rest and carrying every linked transaction as evidence. Attributing a finding to *every* participating merchant — the original shape — multiplied one card's journey into an alert per merchant per hop: a card ping-ponging between two districts all afternoon produced a dozen queue entries describing one story. The queue counts investigations, and "this card was in four places" is one of them.
+
+Which merchant carries it is deterministic, and chosen so the alert lands where the question is:
+
+| Rule | Attributed to |
+|---|---|
+| One card across related merchants | the branch with the most of that card's transactions that day |
+| Card swarming | the merchant with the most of that card's transactions in the window |
+| Impossible geo-velocity | the **arrival** end of the fastest leg — the merchant that accepted a card which could not have been present |
+
+The other participants are named in the finding, listed in `linkage.merchants`, and their transactions are in the evidence — see §5.9.
+
+### 5.5 Branch structuring — why a hard count, not a statistic
+
+The source schema carries **no `terminal_id`**, so "different branches of the same merchant" can only be expressed as distinct `merchant_id`s sharing an identity hash. That is the only form of the idea the data supports.
+
+The test is a hard daily count: a customer visiting up to three branches of one chain in a day is plausible; a fourth owes an explanation. A count a compliance officer can defend in a report beats a z-score nobody can explain, and there is no natural distribution here to fit anyway.
+
+### 5.6 Impossible geo-velocity — the distance question, answered
+
+Distance between the two subdistrict centroids ÷ elapsed time. Three decisions are load-bearing:
+
+- **A committed coordinate table, never a maps API.** `backend/src/compliance/data/hk_geo.json` holds a centroid for every subdistrict in the source data plus a district-level fallback. A detector whose answer depends on an external service is not reproducible for audit and cannot run air-gapped. Coordinates rather than a precomputed N×N matrix: 106 points is a 4 KB file where the matrix is 11,236 entries, and a new subdistrict costs one line instead of a rebuild. Haversine at runtime is microseconds.
+- **The threshold is 60 km/h, not walking pace.** Hong Kong door-to-door speed is bounded by MTR and road traffic. A 1.5 m/s (≈5 km/h) limit would flag essentially every card used in two districts on the same day, because that is slower than the journey actually takes. 60 km/h is already generous, which is the right direction for a rule that accuses a card of being in two places at once.
+- **The bias is deliberately toward under-flagging.** Centroid distance ignores terrain, harbour crossings and road routing, so it is a **lower bound** on the real journey — and therefore a lower bound on the implied speed. Two merchants in the same subdistrict read as 0 km apart and can never trip the rule at all. A `min_km` floor of 3 km keeps the rule away from the range where centroid distance is meaningless. Two transactions at the same recorded minute yield *no* speed rather than an infinite one: a zero-second gap is clock resolution or a batch import, not supersonic travel.
+
+> **Scope change, recorded.** The detection-layer spec §5.3 placed impossible geo-velocity **out of scope** as cardholder fraud rather than merchant integrity. It is built here as a deliberate reversal, requested in feedback03. The justification: a card physically impossible to have been present at both merchants means at least one of them accepted a card that was not there, which *is* a merchant-acceptance question. Its output is a ring signal, not a fraud verdict, and the fraud-team integration point still stands. BIN / card-testing remains out; the merchant-side substitute is the Family B decline-ratio rule.
+
+### 5.7 Coverage limit — half the portfolio has no card identifier
+
+Measured against the real extract (first 800k rows), `hashed_pan` is present on **48%** of transactions, and its presence is entirely determined by the payment rail:
+
+| Rail | Share of rows | `hashed_pan` present |
+|---|---|---|
+| Mastercard · Visa · Amex · JCB | 46% | 100% |
+| UnionPay | 2% | 85% |
+| **Alipay · Octopus · WeChat · PayMe** | **52%** | **0%** |
+
+This is not a data-quality defect — a stored-value or wallet transaction has no card number to hash. But it is a real detection gap and it must not be discovered by an analyst wondering why a ring was missed:
+
+> **The source writes the absent PAN as `""`, not as NULL — and an empty string equals an empty string.** That single fact turned the coverage gap into a detection failure. Every wallet row passed a `hashed_pan IS NOT NULL` filter and then grouped *together*, so 52% of the portfolio read as **one card**. Measured on the busiest day of the real extract, 79,891 wallet rows collapsed into a single chain touching **2,592 distinct merchants**, which every card-linkage rule dutifully reported as a ring — 65,000+ alerts, none of them true.
+>
+> The fix is in three places, deliberately redundant, because the failure was silent and produced confident output:
+> 1. **Ingestion folds blank to NULL** (`ingest._text`), for both the JSON and CSV paths. Absent now behaves like absent.
+> 2. **The ring query rejects `""` explicitly**, covering rows loaded before (1).
+> 3. **`rings.WALLET_RAILS` excludes the rails by name.** A blank check alone would start producing rings again the day the source begins emitting a per-wallet token — and "one Alipay account used at many shops" is a customer, not a ring.
+>
+> For calibration, the same day's *real* cards: the largest fanout is **4 merchants**, and **no card at all** reaches the 5-merchant card-swarm threshold. Geo-velocity finds 5 impossible legs across 5 cards. That is the true volume this layer produces.
+
+> **Every card-linkage rule — branch structuring, card swarming, geo-velocity — is blind on wallet rails.** Slightly over half of Hong Kong volume in this extract moves on Octopus, Alipay, WeChat and PayMe, and none of it can be traced across merchants by this layer. A ring transacting exclusively on Octopus is invisible to Family C's card sub-layer.
+>
+> **The merchant-identity layer (§5.1) is unaffected** and covers every merchant regardless of rail, which is a further reason it leads. Family A's per-rail baselines (§3f) and the Family B typologies also run on wallet transactions normally.
+
+A second limit: **85% of cards in the extract appear exactly once**, and only ~3% appear three times or more. The card-linkage rules are therefore looking for a rare shape in a sparse graph — appropriate for a ring signal, but not a layer that will produce steady volume.
+
+### 5.8 The PAN hash never leaves the ring module
+
+`hashed_pan` is 1:1 and unsalted by construction, so it is brute-forceable back to a card number — cardholder data, not a safe token. It is read *only* inside `detection/rings.py`, to group. Every piece of evidence Family C produces names the **counterpart merchant** and the **transaction ids** — what an analyst actually needs — and never the identifier that linked them. An analyst can see that one card connected two merchants without ever being handed the card. This is enforced by test, not by convention.
 
 **Why merchant-identity rings come first:**
 
@@ -252,6 +422,27 @@ flowchart TD
 | In scope | yes, directly | yes, but gated |
 
 > The hashed PAN is 1:1 and therefore unsalted, and an unsalted PAN hash is reversible (fix the BIN and Luhn digit → ~10⁹ candidates). Treat it as sensitive data, prefer a keyed HMAC, keep it out of the analyst UI. See open questions Q2.
+
+### 5.9 What a card-linkage finding shows the analyst
+
+**The case is about the card, not about a merchant.** One card at ten merchants is one investigation. Heading its page with one of those ten — whichever the alert was filed against — buries the subject and leaves the analyst to discover that the other nine exist. So for a card-linkage alert the merchant identity band is replaced by a **card band**: the card reference, every merchant it touched with trade and location, the districts spanned, the time window, the transaction count and value, the rails, and whether the merchants are one owner. The attributed merchant is marked *alert filed here* — it is one row among the others, not the frame of the page. The page opens on the **Card trail**, and the merchant's own day is demoted to a last tab named *This merchant's day*, because on a card case that is context and not evidence.
+
+A ring finding is the one case where the merchant's own day ledger **cannot** hold the evidence. The claim is "the same card was at these merchants at these times", and half of it happened at somebody else's shop — so an analyst either took the verdict on trust or opened each counterparty and lined the timestamps up by hand.
+
+**The trail is the card's whole day, not only the transactions that tripped the rule.** A finding showing two transactions 20 minutes and 35 km apart immediately raises "what else did this card do?", and the answer has to be on the page. It is assembled at *detection* time, inside `rings.py`, which is what keeps `hashed_pan` in the detection layer — the case page resolves transaction ids and never touches the card. The transactions the rule actually fired on stay marked (`focus_txn_ids`), so widening the evidence does not blur what the accusation rests on, and the arrival end of an impossible leg carries its implied speed on its own row.
+
+Each card-linkage hit therefore records a `linkage` block alongside its contributions, frozen onto the alert like everything else:
+
+| Field | What it carries |
+|---|---|
+| `card_ref` | A display label — *"card 1"*, *"card 2"* — so an analyst can see two findings concern the same card. **A position in this run's sort order, never derived from the PAN hash**: a truncation or re-hash of that hash is still a function of cardholder data, where a rank carries no information about the card at all. |
+| `merchants` | Every merchant the card touched in the finding. |
+| `related` | Whether those merchants share an identity hash — branches of one chain, or unconnected shops. The distinction *is* the difference between branch structuring and card swarming. |
+| `legs` | Geo-velocity only: per hop, the two places, the centroid distance, the elapsed minutes, the implied km/h, the limit, and the multiple over it. |
+
+`GET /api/alerts/{id}/linked-transactions` resolves the frozen transaction ids into the card's activity across every merchant, in time order, with the **gap to the previous transaction** as a column — that gap is what the impossible-travel claim rests on, so it is a column rather than something to be worked out. Rows are marked with the merchant carrying the alert and with a *Chain* label where merchants share ownership. The endpoint reads transaction ids and never `hashed_pan`, so the card that did the linking does not approach the API boundary.
+
+On the case page this is the **Card trail** tab, which appears only for alerts that have one, and the leg arithmetic renders under **Statistical proof** — an analyst asked to accept that a journey was impossible is owed the sum that says so, not a label.
 
 ---
 
@@ -351,18 +542,26 @@ Which source columns feed which detector.
 | Detector | Columns |
 |---|---|
 | Amount baseline (own + MCC/subdistrict peer) | `total_amount`, `net_amount`, `mcc`, `merchant_subdistrict` |
+| Payment-method baseline | `total_amount`, `card_type` |
+| Volume / speed baselines | `hkt_transaction_time` |
 | Time baseline | `hkt_transaction_time` |
 | Card-origin baseline | `card_issuing_country`, `card_origin`, `card_issuing_bank` |
 | Peer cohorts | `mcc`, `merchant_subdistrict`, `merchant_district`, `merchant_area`, `city` |
-| Structuring | `total_amount`, `hkt_transaction_time` |
-| Refund abuse | `transaction_status` / `net_amount` sign *(encoding to confirm — Q1)*, `hashed_pan` |
-| Declared vs actual mismatch | `mcc`, `business_nature`, `ownership_or_business_type`, `business_plan` |
+| Structuring | `total_amount`, `hkt_transaction_time`, `transaction_status` |
+| Refund abuse · rapid movement · bust-out | `transaction_status`, `total_amount`, `hkt_transaction_time` |
+| Dormant reactivation | `hkt_transaction_time` |
+| Declared vs actual mismatch | `mcc`, `business_nature`, `ownership_or_business_type`, `business_plan`, `total_amount`, `hkt_transaction_time` |
 | Decline-ratio spike | `transaction_status` |
 | Merchant-identity rings | `hashed_br_number`, `hashed_merchant_address`, `hashed_merchant_name`, `agent_id` |
-| Card-linkage rings *(gated)* | `hashed_pan` |
+| Card-linkage rings *(gated)* | `hashed_pan`, `merchant_id`, `hkt_transaction_time` |
+| Impossible geo-velocity *(gated)* | `hashed_pan`, `merchant_subdistrict`, `merchant_district`, `hkt_transaction_time` + the committed `hk_geo.json` coordinate table |
 | Merchant state | `merchant_status`, `merchant_id` |
 
 Not used for detection: `masked_pan` (display only — never an identifier), `payment_gateway`, `currency` (until multi-currency rules exist).
+
+**Refund encoding — Q1, resolved.** The real extract's `transaction_status` takes the values `SUCCESS`, `DECLINED`, `NONE`, `CANCELLED`, `REVERSED`, `VOIDED`, `REFUNDED`, `PENDING`, `AUTHORIZED`. `REFUNDED` / `REVERSED` / `CHARGEBACK` are treated as value moving back out; `DECLINED` as an attempted-and-refused authorisation; `CANCELLED` / `VOIDED` as attempts that did not complete. `card_origin` is `DOMESTIC` / `FOREIGN`, distinct from `card_issuing_country`, which carries the actual country.
+
+**Data-quality note.** The extract contains spelling variants — `'Lamma island '` with a trailing space, and both `'Kwai fong'` and `'Kuai fong'`. The geo lookup folds case and whitespace and maps both variants, because matching raw strings would silently drop those rows out of every geographic check without reporting it.
 
 ---
 
@@ -387,3 +586,13 @@ Not used for detection: `masked_pan` (display only — never an identifier), `pa
 | Added the **baseline provenance page** | What each baseline is built from, and which day joins it tonight, was invisible. |
 | Added **subdistrict** as a cohort dimension | Peer tests keyed on MCC alone. A HKD 800 ticket is ordinary for a Central restaurant and remarkable in Sham Shui Po, and foreign-card share is a property of the district, not the trade. |
 | Added **cohort operating hours** | A cold-start merchant has no hours pattern of its own, so only its trade's hours can say 3am is odd. |
+| Added **per-payment-method amount baselines** | A pooled baseline's spread is set by the widest rail and swallows the narrow one. HKD 3,000 on Octopus is remarkable and invisible next to Visa. |
+| Added a **materiality floor** | Statistical significance is not practical significance. A HKD 150 four-sigma outlier at a convenience store is worthless to a launderer, and thousands of them buried the actionable alerts. |
+| Thresholds moved into the **database, with per-MCC overrides** | The compliance lead calibrating against real dispositions should not need an engineer to change a number, and one global threshold either floods the volatile trades or goes blind on the steady ones. |
+| **Family B specified as exact tests**, not descriptions | "Structuring / smurfing — clustering of amounts just under a threshold" is not a specification. Each rule now states its condition, its parameters, and the second condition that stops it firing on ordinary trade. |
+| Family B rules became **parameterised templates stored as data** | So a compliance officer can retune them and add their own scoped instances without a deploy — and so the tuning UI renders from the backend's declaration rather than a duplicated list. |
+| **Family C specified as exact tests**, and built | Including the two the diagram previously only named: one card across related merchants, and card swarming. |
+| **Branch structuring** expressed as merchants sharing an identity hash | The source has no `terminal_id`, so this is the only form of "different branches of the same merchant" the data supports. A hard daily count, not a statistic. |
+| **Impossible geo-velocity moved in scope** and built | Deliberate reversal of §5.3. A card that cannot have been present at both merchants means one of them accepted a card that was not there — a merchant-acceptance question. Threshold 60 km/h, not walking pace. |
+| Added a **committed HK coordinate table** | The pipeline must never call a maps API: an answer that depends on an external service is not reproducible for audit and cannot run air-gapped. |
+| Every detector now **names its evidence** | A deviation with no way back to the rows that caused it left the analyst scanning the ledger by hand. Detectors now record the transactions *and the column of each* that carries the cause. |

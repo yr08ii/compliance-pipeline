@@ -11,10 +11,17 @@ const TYPE_TONE: Record<string, Tone> = {
   mcc_peer_discrepancy: "blue",
   subdistrict_anomaly: "warning",
   temporal_anomaly: "navy",
+  // Family B and C. A typology match and a ring signal are not statistical
+  // outliers, and an analyst works them differently, so they carry their own
+  // badges rather than being folded into the four above.
+  typology_match: "danger",
+  ring_signal: "navy",
 };
 
 const TYPE_ORDER = [
   "single_txn_spike",
+  "typology_match",
+  "ring_signal",
   "mcc_peer_discrepancy",
   "subdistrict_anomaly",
   "temporal_anomaly",

@@ -2,8 +2,8 @@
 
 *The statistics and detectors behind the alerts. Refines the flat stub into the real Lane A/B engine.*
 
-**Date:** 2026-07-22 · Draft v1
-**Status:** Design — pending review
+**Date:** 2026-07-22 · Draft v1 · revised 2026-08-05
+**Status:** Families A, B and C implemented. §5.2 card-linkage built but **gated** — the security treatment it requires is not yet in place. One scope reversal recorded in §5.3.
 **Related:** [Closed-Loop Pipeline](../../Compliance_Monitoring_Pipeline_Plan.md) · [Platform Design](2026-07-20-compliance-platform-design.md)
 
 ---
@@ -199,6 +199,16 @@ Statistical baselines do not catch patterns that are individually unremarkable. 
 
 These populate `triggering_detectors` with a rule name and a sub-score. Where a rule has a natural numeric basis (refund ratio, decline ratio), also emit a `feature_snapshot` row so the panel can show it.
 
+### 4.1 Implemented — the exact tests
+
+**Built 2026-08-05.** The table above describes the *signals*; the precise conditions, parameters and shipped defaults are specified in [Detection Flow Diagrams §4a](../../Detection_Flow_Diagrams.md). Three design decisions taken during implementation:
+
+- **Every rule carries a second condition.** A single-condition rule floods the queue: structuring without a check on the merchant's own level fires daily on any jeweller; bust-out without the refund leg fires on every merchant that grows. The guard is the difference between a usable rule and a queue-flooder, and it is documented per rule.
+- **Rules are parameterised templates stored as data**, not constants in code, so a compliance officer can retune them and add their own MCC-scoped instances without a deploy. The reason code on an alert carries the parameters in force, so it still explains itself after a retune.
+- **No free-text expression language.** Analyst-authored predicates evaluated at runtime would be an arbitrary code path into the detection engine, and an AML rule nobody can statically review is not auditable.
+
+**Refund encoding (Q1) is resolved** against the real extract: `REFUNDED`/`REVERSED`/`CHARGEBACK` are value moving out; `DECLINED` is an attempted-and-refused authorisation that moves no money; `CANCELLED`/`VOIDED` are incomplete attempts. Refunds are excluded from the decline ratio's denominator, or a heavy refund day would dilute it and hide a card-testing run.
+
 ---
 
 ## 5. Family C — cross-merchant / ring detection
@@ -234,7 +244,15 @@ Still merchant-integrity relevant, but it carries a real cost that §5.1 does no
 
 ### 5.3 What stays out
 
-**Impossible geo-velocity** and **BIN / card-testing attacks** are technically feasible with `hashed_pan`, but they detect **cardholder / stolen-card fraud** — a different objective and owner (issuer / real-time fraud), out of scope here. Keep them out; note the integration point so a fraud team can consume the same identifier. The merchant-side decline-ratio rule (§4) is the in-scope substitute. Revisit only as a deliberate scope decision.
+**BIN / card-testing attacks** are technically feasible with `hashed_pan`, but they detect **cardholder / stolen-card fraud** — a different objective and owner (issuer / real-time fraud), out of scope here. Keep them out; note the integration point so a fraud team can consume the same identifier. The merchant-side decline-ratio rule (§4) is the in-scope substitute.
+
+> **~~Impossible geo-velocity~~ — scope reversed, 2026-08-05.** This section originally excluded geo-velocity on the same grounds. That exclusion is withdrawn, as a deliberate scope decision requested in feedback03 and recorded here rather than left as a silent contradiction between the spec and the build.
+>
+> **The argument for reversing it:** a card physically impossible to have been present at both merchants means at least one of those merchants accepted a card that was not there. That is a *merchant-acceptance* question, not a cardholder one, and it is squarely our objective. The output is a ring signal joining two merchants, never a fraud verdict on the cardholder.
+>
+> **The argument that kept it out still partly holds** and is why the signal is scored as a ring contributor rather than a standalone flag: the same evidence is also consistent with ordinary card compromise, which is the fraud team's problem, not ours. The integration point in the paragraph above is unchanged.
+>
+> Implemented per [Detection Flow Diagrams §5.6](../../Detection_Flow_Diagrams.md). Distances come from a committed HK subdistrict coordinate table, never a maps API — a detector whose answer depends on an external service is not reproducible for audit and cannot run air-gapped. The threshold is 60 km/h; a walking-pace limit would flag essentially every card used in two districts on the same day, because that is slower than the journey actually takes. Centroid distance understates the real journey, so the rule under-flags by construction.
 
 ---
 
@@ -301,11 +319,25 @@ Every number here is a *starting point* set against synthetic data and re-tuned 
 2c. ~~**Baseline provenance UI**~~ — **done.** Window bounds, next inclusion date, coverage, withheld days.
 2d. ~~**Time and card-origin baselines**~~ — **done** (§3.2, §3.3). Hour-of-day smooths circularly; origin uses Laplace-smoothed surprisal so an unseen country is improbable rather than impossible, and a merchant that always sees foreign cards is not flagged for foreignness.
 
-**Family A is complete.** Next: Family B (the typology ruleset, which is what Lane B merchants still lack) and Family C (ring detection, for which the merchant identity hashes are now ingested).
-3. **Time (circular KDE) and card-origin** baselines; festive-calendar context.
-4. **Typology ruleset** (structuring, refund abuse, bust-out, dormant, rapid movement, declared-vs-actual mismatch, decline-ratio).
-5. **Merchant-identity rings** (§5.1) — equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation. Cheap, in-scope, no card data. Build here, not last.
-6. **Composite scoring + reasons**, then the **two feedback loops** once labels accumulate.
-7. **Card-linkage layer** (§5.2, `hashed_pan`) — *last*, and only after the security treatment (HMAC key, encryption, access control, compliance/PDPO sign-off) is in place.
+**Family A is complete.**
+2e. ~~**Payment-method baselines**~~ — **done.** One amount baseline per merchant per `card_type`: a pooled baseline's spread is set by the widest rail and swallows the narrow one.
+2f. ~~**Materiality floor and tunable thresholds**~~ — **done.** Statistical significance is not practical significance; thresholds live in the database with per-MCC overrides.
 
-Each is its own spec → plan → build increment. Isolation Forest and the cardholder-fraud checks are explicitly deferred / out.
+3. ~~**Time (circular KDE) and card-origin** baselines~~ — **done.** Festive-calendar context still outstanding.
+4. ~~**Typology ruleset**~~ — **done, 2026-08-05.** All seven rules, as parameterised templates with a tuning surface (§4.1).
+5. ~~**Merchant-identity rings** (§5.1)~~ — **done, 2026-08-05.** Equality-join on `hashed_br_number`/`address`/`name` + `agent_id` aggregation.
+6. **Composite scoring + reasons** — *partial.* Every family carries its reasons and per-transaction evidence, and the queue ranks on sub-score. The **blend** is still one-alert-per-hit rather than a normalized multi-family composite, and the **two feedback loops** wait on label volume.
+7. ~~**Card-linkage layer** (§5.2, `hashed_pan`)~~ — **built, 2026-08-05, but gated.** Card swarming, branch structuring and geo-velocity are implemented and covered by tests. The `hashed_pan` never leaves the ring module and never reaches an alert, a contribution, or the UI — enforced by test. **The security treatment named below is still outstanding**, so these three rules should run in shadow until it lands.
+
+**Still outstanding**
+
+| Item | Why it matters |
+|---|---|
+| HMAC re-hashing of `hashed_pan`, or a decision that the source hash is PAN-equivalent | Open question Q2. Until resolved, treat the column as cardholder data at rest. |
+| Encryption at rest + access control on `hashed_pan` | The card-linkage rules are built against a column that is not yet protected to the standard §5.2 requires. |
+| PDPO / compliance sign-off on cardholder linkage | Building a map of where each cardholder transacts needs a documented basis. |
+| Festive calendar (Lunar New Year, Mid-Autumn, Golden Week) | Seasonal surges are currently flagged rather than understood. |
+| Normalized multi-family composite score | Sub-scores are comparable within a family, only roughly across families. |
+| The two feedback loops | Gated on label volume and inter-analyst agreement. |
+
+Isolation Forest and the BIN / card-testing checks remain explicitly deferred / out.

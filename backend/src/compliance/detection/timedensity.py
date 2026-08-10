@@ -272,3 +272,63 @@ def time_is_unusual(hour: float, density: TimeDensity) -> bool:
     if not density.usable or density.threshold <= 0:
         return False
     return density.density_at(hour) < density.threshold
+
+
+# How many off-hours transactions saturate the volume term. Chosen so the
+# curve still separates ordinary counts — a merchant with 1, 5 and 40 off-hours
+# transactions must rank in that order — while a merchant with 400 does not
+# score four hundred times a merchant with one.
+VOLUME_SATURATION = 100.0
+
+# The weights. Volume carries the most because it is the difference between a
+# late closing and a merchant operating at the wrong time of day; share
+# normalises it against how busy the merchant is at all; depth separates an
+# hour this merchant has never traded from the quiet edge of its evening.
+_W_VOLUME, _W_SHARE, _W_DEPTH = 0.55, 0.30, 0.15
+
+
+def unusualness_depth(hour: float, density: TimeDensity) -> float:
+    """How far below the merchant's own cutoff this time of day sits, 0 to 1.
+
+    0 is exactly at the threshold; 1 is an hour with no measured trade at all.
+    Expressed relative to the merchant's own threshold rather than as an
+    absolute density, because densities are not comparable between merchants —
+    a round-the-clock forecourt's busiest hour is thinner than a boutique's
+    quietest.
+    """
+    if not density.usable or density.threshold <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - density.density_at(hour) / density.threshold))
+
+
+def temporal_severity(*, odd_count: int, day_count: int, depth: float) -> float:
+    """How serious an off-hours finding is, in [0, 1].
+
+    Both timing detectors previously reported a flat 0.5. Rank is what decides
+    which case is opened first, so a constant left every temporal alert in the
+    queue tied with every other and ordered by whatever the tie-break happened
+    to be — one transaction at 03:00 sorting alongside four hundred of them.
+
+    Three inputs, in the order they matter:
+
+    * **How many** transactions fell outside the pattern. The signal the
+      feedback identified as missing, and the one an analyst reaches for first.
+    * **What share of the day** they were. Ten off-hours transactions out of
+      ten is a merchant operating at the wrong time; ten out of a thousand is a
+      late closer.
+    * **How far outside** the worst of them sat, from `unusualness_depth`.
+
+    Bounded to [0, 1] because Family A, B and C scores are blended and ranked
+    against one another; an unbounded timing score would dominate the queue.
+    """
+    if odd_count <= 0:
+        return 0.0
+
+    volume = math.log1p(odd_count) / math.log1p(VOLUME_SATURATION)
+    volume = min(volume, 1.0)
+    # `day_count` cannot be below `odd_count` in practice; taking the max keeps
+    # the share a share rather than trusting the caller for it.
+    share = odd_count / max(day_count, odd_count)
+    depth = max(0.0, min(1.0, depth))
+
+    return min(_W_VOLUME * volume + _W_SHARE * share + _W_DEPTH * depth, 1.0)

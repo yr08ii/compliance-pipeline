@@ -116,3 +116,53 @@ class TestIngest:
                                              "merchant_status": "SUSPENDED"}]))
         session.flush()
         assert session.scalars(select(Merchant)).one().merchant_status == "SUSPENDED"
+
+
+class TestBlankFieldsBecomeNull:
+    """A blank in the source means "absent", and it has to be stored that way.
+
+    The real extract carries `hashed_pan=''` on every wallet rail — Alipay,
+    Octopus, WeChat Pay, PayMe — because a wallet has no card number to hash.
+    Stored as an empty string, those rows are all *equal* to one another, so a
+    card-linkage rule reads more than half the portfolio as a single card
+    visiting thousands of merchants. That is not a tuning problem; it is one
+    value pretending to be an identifier.
+    """
+
+    def test_a_blank_pan_is_stored_as_null(self, session):
+        ingest_payload(session, json.dumps([{**ROW, "payment_id": "W1",
+                                             "card_type": "OCTOPUS",
+                                             "hashed_pan": ""}]))
+        session.flush()
+        assert session.scalars(select(Transaction)).one().hashed_pan is None
+
+    def test_a_whitespace_pan_is_stored_as_null(self, session):
+        ingest_payload(session, json.dumps([{**ROW, "payment_id": "W2",
+                                             "hashed_pan": "  "}]))
+        session.flush()
+        assert session.scalars(select(Transaction)).one().hashed_pan is None
+
+    def test_two_wallet_rows_do_not_share_an_identifier(self, session):
+        rows = [
+            {**ROW, "payment_id": "W3", "merchant_id": "M1",
+             "card_type": "ALIPAY", "hashed_pan": ""},
+            {**ROW, "payment_id": "W4", "merchant_id": "M2",
+             "card_type": "WECHAT", "hashed_pan": ""},
+        ]
+        ingest_payload(session, json.dumps(rows))
+        session.flush()
+        pans = [t.hashed_pan for t in session.scalars(select(Transaction))]
+        assert pans == [None, None]
+
+    def test_a_blank_merchant_hash_is_stored_as_null(self, session):
+        """Same failure on the identity side: every merchant with no business
+        registration on file would otherwise join one enormous ring."""
+        ingest_payload(session, json.dumps([{**ROW, "payment_id": "B1",
+                                             "hashed_br_number": ""}]))
+        session.flush()
+        assert session.scalars(select(Merchant)).one().hashed_br_number is None
+
+    def test_a_real_value_is_untouched(self, session):
+        ingest_payload(session, json.dumps([ROW]))
+        session.flush()
+        assert session.scalars(select(Transaction)).one().hashed_pan == "abc123"

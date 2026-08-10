@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from compliance.db import get_session
 from compliance.models import Alert, Disposition, Merchant, MerchantProfile
@@ -8,8 +8,10 @@ from datetime import date as _date
 
 from compliance import cases as case_svc
 from compliance import diagnostics as diag
+from compliance import rules_store
 from compliance import settings_store
 from compliance import glossary
+from compliance.detection import ruleset
 from compliance.schemas import (
     AlertOut,
     AlertPage,
@@ -21,9 +23,11 @@ from compliance.schemas import (
     DispositionOut,
     Diagnostics,
     Ledger,
+    LinkedTransactions,
     BaselineOverview,
     BaselineRow,
     Glossary,
+    RuleSet,
 )
 
 
@@ -151,15 +155,26 @@ def create_app() -> FastAPI:
             Disposition.alert_id == Alert.id
         ).exists()
         conditions = [undecided]
-
-        rows = list(session.scalars(select(Alert).where(*conditions).order_by(Alert.rank)))
         if alert_type:
-            rows = [a for a in rows if diag.alert_type(a) == alert_type]
+            conditions.append(Alert.alert_type == alert_type)
 
-        total = len(rows)
-        start = (page - 1) * page_size
+        # Counted and sliced in the database. Materialising the queue to slice
+        # it in Python made every page view cost the whole open queue — tens of
+        # thousands of rows, both JSON columns included — to render twenty.
+        total = session.scalar(
+            select(func.count()).select_from(Alert).where(*conditions)
+        ) or 0
+        rows = list(
+            session.scalars(
+                select(Alert)
+                .where(*conditions)
+                .order_by(Alert.rank)
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
         names = diag.mcc_descriptions(session)
-        items = [_with_metadata(session, a, names) for a in rows[start : start + page_size]]
+        items = [_with_metadata(session, a, names) for a in rows]
 
         return AlertPage(
             total=total,
@@ -179,13 +194,26 @@ def create_app() -> FastAPI:
         undecided = ~select(Disposition.id).where(
             Disposition.alert_id == Alert.id
         ).exists()
-        rows = list(session.scalars(select(Alert).where(undecided)))
-        counts: dict[str, int] = {}
-        for a in rows:
-            key = diag.alert_type(a)
-            counts[key] = counts.get(key, 0) + 1
-        scored = diag.scored_date(rows[0]) if rows else None
-        return {"total": len(rows), "by_type": counts, "scored_date": scored}
+        # Aggregated in the database. Tallying in Python meant loading the
+        # whole queue a second time, in parallel with the page request that
+        # was already loading it once.
+        counts = {
+            key: count
+            for key, count in session.execute(
+                select(Alert.alert_type, func.count())
+                .where(undecided)
+                .group_by(Alert.alert_type)
+            )
+            if key
+        }
+        first = session.scalars(
+            select(Alert).where(undecided).order_by(Alert.rank).limit(1)
+        ).first()
+        return {
+            "total": sum(counts.values()),
+            "by_type": counts,
+            "scored_date": diag.scored_date(first) if first else None,
+        }
 
     @app.post("/api/alerts/{alert_id}/disposition", response_model=DispositionOut)
     def decide(
@@ -304,6 +332,49 @@ def create_app() -> FastAPI:
         session.commit()
         return {"current": settings.as_dict(), "defaults": known}
 
+    @app.get("/api/rules", response_model=RuleSet)
+    def read_rules(session: Session = Depends(get_session)) -> RuleSet:
+        """The Family B and C rule set, with the catalogue behind it.
+
+        The templates ship alongside the instances so the tuning screen renders
+        its controls from the backend's declaration rather than a duplicated
+        list in the frontend — a rule cannot then gain a parameter that the UI
+        has no way to reach.
+        """
+        return RuleSet(
+            templates=[
+                ruleset.template_as_dict(t) for t in ruleset.TEMPLATES
+            ],
+            instances=[i.as_dict() for i in rules_store.load_rules(session)],
+        )
+
+    @app.put("/api/rules", response_model=RuleSet)
+    def write_rules(payload: dict, session: Session = Depends(get_session)) -> RuleSet:
+        """Replace the rule set.
+
+        Takes effect on the next pipeline run. Rejected as a whole if any
+        instance is invalid: a partial save would leave the officer believing
+        they had configured something they had not.
+        """
+        try:
+            instances = [
+                ruleset.RuleInstance.from_dict(raw)
+                for raw in (payload.get("instances") or [])
+            ]
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        problems = rules_store.validate(instances)
+        if problems:
+            raise HTTPException(status_code=422, detail="; ".join(problems))
+
+        rules_store.save_rules(session, instances)
+        session.commit()
+        return RuleSet(
+            templates=[ruleset.template_as_dict(t) for t in ruleset.TEMPLATES],
+            instances=[i.as_dict() for i in instances],
+        )
+
     @app.get("/api/alerts/{alert_id}", response_model=AlertOut)
     def get_alert(alert_id: int, session: Session = Depends(get_session)) -> AlertOut:
         alert = session.get(Alert, alert_id)
@@ -321,6 +392,27 @@ def create_app() -> FastAPI:
         if alert is None:
             raise HTTPException(status_code=404, detail="alert not found")
         return Diagnostics(**diag.diagnostics(session, alert))
+
+    @app.get(
+        "/api/alerts/{alert_id}/linked-transactions",
+        response_model=LinkedTransactions,
+    )
+    def get_linked_transactions(
+        alert_id: int, session: Session = Depends(get_session)
+    ) -> LinkedTransactions:
+        """The same card's activity across every merchant a ring alert names.
+
+        Separate from the day ledger because it answers a different question.
+        The ledger shows one merchant's day; a card-linkage finding is a claim
+        about several merchants at once, and its evidence is unreadable when
+        half of it sits behind another merchant's page.
+
+        Empty for alerts with no card-linkage finding, which is most of them.
+        """
+        alert = session.get(Alert, alert_id)
+        if alert is None:
+            raise HTTPException(status_code=404, detail="alert not found")
+        return LinkedTransactions(**diag.card_linkage(session, alert))
 
     @app.get("/api/merchants/{merchant_id}/transactions", response_model=Ledger)
     def get_ledger(

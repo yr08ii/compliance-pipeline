@@ -1,18 +1,21 @@
 """Nightly pipeline stages.
 
-Stages 2-4 now run Family A's robust amount baseline. Stage 1 (pull) is still
-stood in for by generated data, and Family B/C detectors are not built yet.
+Stage 1 (pull) is still stood in for by generated data. Stages 2-6 run the
+full detection layer: Family A's robust baselines, Family B's typology
+ruleset, and Family C's portfolio-wide ring detection.
 
 Everything here is deterministic: same input, same output, every run. That is
 an audit requirement, not a preference.
 """
 
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import Baseline, DispersionMethod, score_value
+from compliance.detection.evidence import Contribution
 from compliance.detection.profiles import (
     OriginMix,
     fit_origin_mix,
@@ -24,7 +27,9 @@ from compliance.detection.timedensity import (
     fit_cohort_time_density,
     fit_time_density,
     local_time_of_day,
+    temporal_severity,
     time_is_unusual,
+    unusualness_depth,
 )
 from compliance.detection.windows import (
     _window_bounds,
@@ -41,7 +46,21 @@ from compliance.detection.windows import (
     fit_volume_baselines,
     quarantined_days,
 )
-from compliance.models import Alert, Merchant, MerchantProfile, Transaction
+from compliance.detection.rings import (
+    CardEvent,
+    MerchantNode,
+    RingInput,
+    evaluate as evaluate_rings,
+)
+from compliance.detection.ruleset import Family
+from compliance.detection.typology import (
+    Txn,
+    TypologyInput,
+    evaluate as evaluate_typologies,
+)
+from compliance.models import Alert, Disposition, Merchant, MerchantProfile, Transaction
+from compliance.pipeline.merchant_study import merchant_level_is_comparable
+from compliance.rules_store import active_rules
 from compliance.settings_store import load_settings
 
 # Rolling window and minimum history for a usable baseline. Starting points —
@@ -276,19 +295,114 @@ def scored_day_bounds(as_of: datetime) -> tuple[datetime, datetime]:
     return end - timedelta(days=1), end
 
 
+@dataclass(frozen=True)
+class ScoredTxn:
+    """One transaction on the day being scored.
+
+    Carries `source_txn_id` because a detector must be able to name the
+    transactions that drove it — a deviation with no way back to the rows that
+    caused it leaves the analyst scanning the ledger by hand.
+    """
+
+    source_txn_id: str
+    amount: float
+    occurred_at: datetime
+    is_refund: bool
+    status: str | None
+    card_type: str | None
+    country: str | None
+
+    @property
+    def hour(self) -> float:
+        return local_time_of_day(self.occurred_at)
+
+
+def _scored_day_rows(
+    session: Session, merchant_id: str, as_of: datetime
+) -> list[ScoredTxn]:
+    """Every transaction a merchant processed on the day being scored.
+
+    Fetched once per merchant and shared by every detector. Previously each
+    detector ran its own narrow query for just the column it needed, which
+    meant five round trips for one day's data and — more importantly — no
+    detector could see the transaction ids it was judging.
+
+    Refunds and declines are included here and filtered per detector, because
+    the typology rules need exactly the rows the amount baselines exclude.
+    """
+    start, end = scored_day_bounds(as_of)
+    rows = session.execute(
+        select(
+            Transaction.source_txn_id,
+            Transaction.total_amount,
+            Transaction.occurred_at,
+            Transaction.is_refund,
+            Transaction.transaction_status,
+            Transaction.card_type,
+            Transaction.card_issuing_country,
+        )
+        .where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+        )
+        .order_by(Transaction.occurred_at)
+    )
+    return [ScoredTxn(*row) for row in rows]
+
+
+def _contributions(rows: list[ScoredTxn], field: str, reason: str) -> list[dict]:
+    """Point at a set of transactions with one shared cause."""
+    return [
+        Contribution(
+            source_txn_id=r.source_txn_id,
+            field=field,
+            value=_field_value(r, field),
+            reason=reason,
+        ).as_dict()
+        for r in rows
+    ]
+
+
+def _field_value(row: ScoredTxn, field: str) -> str:
+    """The displayed value of the column a detector is pointing at."""
+    if field == "total_amount":
+        return f"HKD {row.amount:,.2f}"
+    if field == "occurred_at":
+        return row.occurred_at.isoformat()
+    if field == "card_issuing_country":
+        return row.country or "unknown"
+    if field == "card_type":
+        return row.card_type or "unknown"
+    if field == "transaction_status":
+        return row.status or "unknown"
+    return ""
+
+
 def _scored_day_amounts(session: Session, merchant_id: str, as_of: datetime) -> list[float]:
     """Gross amounts on the day being scored."""
-    start, end = scored_day_bounds(as_of)
-    return list(
-        session.scalars(
-            select(Transaction.total_amount).where(
-                Transaction.merchant_id == merchant_id,
-                Transaction.occurred_at >= start,
-                Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
-            )
-        )
-    )
+    return [r.amount for r in _scored_day_rows(session, merchant_id, as_of) if not r.is_refund]
+
+
+def _peak_window(rows: list[ScoredTxn], window_minutes: int = 60) -> list[ScoredTxn]:
+    """The transactions inside the busiest window of that length.
+
+    Returns the rows rather than the count, so the velocity detector can point
+    at the burst itself. Same sliding-window logic as `_peak_rate`, which still
+    scores the baseline fitting where only the count is needed.
+    """
+    if not rows:
+        return []
+    ordered = sorted(rows, key=lambda r: r.occurred_at)
+    span = timedelta(minutes=window_minutes)
+    best = (0, 1)
+    start = 0
+    for end in range(len(ordered)):
+        while ordered[end].occurred_at - ordered[start].occurred_at >= span:
+            start += 1
+        if end - start + 1 > best[1] - best[0]:
+            best = (start, end + 1)
+    return ordered[best[0] : best[1]]
 
 
 def _scored_day_peak_rate(
@@ -379,7 +493,9 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # history of the merchant's own, so it is the only Family A signal a
         # cold-start merchant can be scored against — and the only one immune
         # to that merchant's own baseline being contaminated.
-        day_amounts = _scored_day_amounts(session, p.merchant_id, as_of)
+        day_rows = _scored_day_rows(session, p.merchant_id, as_of)
+        sales = [r for r in day_rows if not r.is_refund]
+        day_amounts = [r.amount for r in sales]
 
         # Volume: transacting far more than usual, or far more than peers,
         # is a signal in its own right — and it is what makes an attempt to
@@ -407,6 +523,13 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": own_vol.center,
                         "deviation": round(vol_score.deviation, 2),
                     },
+                    # A count has no single driving transaction — every one of
+                    # them is the evidence, so all are marked.
+                    "contributions": _contributions(
+                        sales, "occurred_at",
+                        f"one of {int(day_count)} transactions today, against a "
+                        f"usual {own_vol.center:,.0f}",
+                    ),
                 })
 
         if p.metrics.get("peer_volume_usable") and day_count:
@@ -429,13 +552,19 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": cohort_vol.center,
                         "deviation": round(pv_score.deviation, 2),
                     },
+                    "contributions": _contributions(
+                        sales, "occurred_at",
+                        f"one of {int(day_count)} transactions today, against "
+                        f"{cohort_vol.center:,.0f} for this trade",
+                    ),
                 })
 
         # Speed: how tightly today's transactions cluster. A structuring
         # burst can put many through in minutes while the day's total stays
         # unremarkable, so daily volume alone would miss it.
         if p.metrics.get("velocity_usable"):
-            today_peak = _scored_day_peak_rate(session, p.merchant_id, as_of)
+            burst = _peak_window(sales)
+            today_peak = float(len(burst))
             if today_peak:
                 own_vel = Baseline(
                     center=p.metrics["velocity_center"],
@@ -456,6 +585,14 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                             "baseline_value": own_vel.center,
                             "deviation": round(vel_score.deviation, 2),
                         },
+                        # Only the transactions inside the busiest hour, not
+                        # the whole day: the burst is the finding, and marking
+                        # quiet trading either side of it would bury it.
+                        "contributions": _contributions(
+                            burst, "occurred_at",
+                            f"one of {int(today_peak)} transactions inside the "
+                            f"busiest hour",
+                        ),
                     })
 
         # When: trading at an hour this merchant never trades.
@@ -464,32 +601,50 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                 tuple(p.metrics["hours_density"]), p.metrics["hours_threshold"],
                 p.metrics["hours_bandwidth"], p.metrics["hours_n"],
             )
-            odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
-                   if time_is_unusual(h, hours)]
+            odd = [r for r in sales if time_is_unusual(r.hour, hours)]
             if odd:
-                worst_hour = min(odd, key=hours.density_at)
+                worst = min(odd, key=lambda r: hours.density_at(r.hour))
+                worst_hour = worst.hour
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
                     "detector": HOUR_DETECTOR,
-                    "sub_score": 0.5,
+                    # Ranked on how much of the day fell outside the pattern
+                    # and how far outside it sat. A flat score left every
+                    # temporal alert tied, so their order in the queue was
+                    # whatever the tie-break produced.
+                    "sub_score": temporal_severity(
+                        odd_count=len(odd),
+                        day_count=len(sales),
+                        depth=unusualness_depth(worst_hour, hours),
+                    ),
                     "feature": {
                         "feature_name": "transaction_hour",
                         "merchant_value": round(worst_hour, 2),
                         "baseline_value": round(hours.peak_hour(), 2),
                         "deviation": round(hours.density_at(worst_hour), 4),
                     },
+                    "contributions": _contributions(
+                        odd, "occurred_at",
+                        f"outside this merchant's trading pattern "
+                        f"(usual peak {hours.peak_hour():.0f}:00)",
+                    ),
                 })
 
         # Whose cards: a shift in issuing countries. Foreignness itself is not
         # the signal — an airport shop always sees tourists; a change is.
         if p.metrics.get("origin_usable"):
             mix = OriginMix(dict(p.metrics["origin_counts"]), p.metrics["origin_n"])
-            today = _scored_day_origins(session, p.merchant_id, as_of)
+            with_origin = [r for r in sales if r.country]
+            today = [r.country for r in with_origin]
             scored = [(o, origin_surprisal(o, mix)) for o in set(today)]
             flagged = [(o, s) for o, s in scored if s > SURPRISAL_FLAG]
             if flagged:
                 origin, surprisal = max(flagged, key=lambda pair: pair[1])
+                # Every transaction on a surprising origin is implicated, and
+                # the issuing country is the field that implicates it — so the
+                # ledger can highlight that cell rather than the whole row.
+                driving = [r for r in with_origin if r.country in {o for o, _ in flagged}]
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -501,6 +656,19 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": round(mix.share(origin), 3),
                         "deviation": round(surprisal, 2),
                     },
+                    "contributions": [
+                        Contribution(
+                            source_txn_id=r.source_txn_id,
+                            field="card_issuing_country",
+                            value=r.country or "unknown",
+                            reason=(
+                                f"cards issued in {r.country} are "
+                                f"{mix.share(r.country):.1%} of this merchant's "
+                                f"normal mix"
+                            ),
+                        ).as_dict()
+                        for r in driving
+                    ],
                 })
 
         # Cohort hours — the only thing that can call 3am odd for a merchant
@@ -510,21 +678,29 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                 tuple(p.metrics["cohort_hours_density"]),
                 p.metrics["cohort_hours_threshold"], 0.0, p.metrics["cohort_hours_n"],
             )
-            odd = [h for h in _scored_day_hours(session, p.merchant_id, as_of)
-                   if time_is_unusual(h, ch)]
+            odd = [r for r in sales if time_is_unusual(r.hour, ch)]
             if odd:
-                worst_hour = min(odd, key=ch.density_at)
+                worst_hour = min(odd, key=lambda r: ch.density_at(r.hour)).hour
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
                     "detector": PEER_HOUR_DETECTOR,
-                    "sub_score": 0.5,
+                    "sub_score": temporal_severity(
+                        odd_count=len(odd),
+                        day_count=len(sales),
+                        depth=unusualness_depth(worst_hour, ch),
+                    ),
                     "feature": {
                         "feature_name": "hour_vs_trade_hours",
                         "merchant_value": round(worst_hour, 2),
                         "baseline_value": round(ch.peak_hour(), 2),
                         "deviation": round(ch.density_at(worst_hour), 4),
                     },
+                    "contributions": _contributions(
+                        odd, "occurred_at",
+                        f"outside the hours this trade normally operates "
+                        f"(cohort peak {ch.peak_hour():.0f}:00)",
+                    ),
                 })
 
         # District amount — a ticket ordinary for Central can be remarkable in
@@ -536,9 +712,13 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                 method=DispersionMethod.MAD,
                 n=p.metrics["peer_merchants"],
             )
-            worst_d = max((score_value(a, dist_base) for a in day_amounts),
-                          key=lambda s: s.deviation)
+            scored_rows = [(r, score_value(r.amount, dist_base)) for r in sales]
+            worst_d = max((s for _, s in scored_rows), key=lambda s: s.deviation)
             if tune.fires(deviation=worst_d.deviation, amount=worst_d.value):
+                breaching = [
+                    r for r, s in scored_rows
+                    if tune.fires(deviation=s.deviation, amount=r.amount)
+                ]
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -550,6 +730,11 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": dist_base.center,
                         "deviation": round(worst_d.deviation, 2),
                     },
+                    "contributions": _contributions(
+                        breaching, "total_amount",
+                        f"above what merchants in this district normally take "
+                        f"(typical {dist_base.center:,.0f})",
+                    ),
                 })
 
         # Foreign-card share against the district norm. Foreignness is not the
@@ -577,6 +762,14 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                             "baseline_value": round(fbase.center, 3),
                             "deviation": round(fscore.deviation, 2),
                         },
+                        # The overseas-issued cards are what lifted the share,
+                        # and the issuing country is the field that says so.
+                        "contributions": _contributions(
+                            [r for r in sales if r.country and r.country != "HK"],
+                            "card_issuing_country",
+                            f"overseas-issued, against a district norm of "
+                            f"{fbase.center:.1%}",
+                        ),
                     })
 
         # Per rail: HKD 3,000 on Octopus is remarkable, the same on Visa is
@@ -591,16 +784,16 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
             )
             if not rail_base.usable:
                 continue
-            rail_amounts = _scored_day_amounts_for_rail(
-                session, p.merchant_id, as_of, rail
-            )
-            if not rail_amounts:
+            rail_rows = [r for r in sales if r.card_type == rail]
+            if not rail_rows:
                 continue
-            worst_rail = max(
-                (score_value(a, rail_base) for a in rail_amounts),
-                key=lambda s: s.deviation,
-            )
+            scored_rail = [(r, score_value(r.amount, rail_base)) for r in rail_rows]
+            worst_rail = max((s for _, s in scored_rail), key=lambda s: s.deviation)
             if tune.fires(deviation=worst_rail.deviation, amount=worst_rail.value):
+                breaching = [
+                    r for r, s in scored_rail
+                    if tune.fires(deviation=s.deviation, amount=r.amount)
+                ]
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -612,6 +805,11 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": rail_base.center,
                         "deviation": round(worst_rail.deviation, 2),
                     },
+                    "contributions": _contributions(
+                        breaching, "total_amount",
+                        f"large for {rail} at this merchant "
+                        f"(typical {rail_base.center:,.0f} on this rail)",
+                    ),
                 })
 
         # Peer test 1 — is this merchant's TRANSACTION unusual for its trade?
@@ -625,11 +823,13 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                 method=DispersionMethod.MAD,
                 n=p.metrics["peer_merchants"],
             )
-            worst = max(
-                (score_value(a, cohort_txn) for a in day_amounts),
-                key=lambda s: s.deviation,
-            )
+            scored_peer = [(r, score_value(r.amount, cohort_txn)) for r in sales]
+            worst = max((s for _, s in scored_peer), key=lambda s: s.deviation)
             if tune.fires(deviation=worst.deviation, amount=worst.value):
+                breaching = [
+                    r for r, s in scored_peer
+                    if tune.fires(deviation=s.deviation, amount=r.amount)
+                ]
                 hits.append({
                     "merchant_id": p.merchant_id,
                     "lane": lanes.get(p.merchant_id, "B"),
@@ -641,12 +841,21 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         "baseline_value": cohort_txn.center,
                         "deviation": round(worst.deviation, 2),
                     },
+                    "contributions": _contributions(
+                        breaching, "total_amount",
+                        f"above what this trade normally takes "
+                        f"(typical {cohort_txn.center:,.0f})",
+                    ),
                 })
 
         # Peer test 2 — is this MERCHANT unusual for its cohort? Catches the
         # systematic case test 1 cannot: every ticket sits inside the cohort's
         # range, but the merchant's whole level is shifted.
-        if p.metrics.get("peer_usable") and p.metrics.get("baseline_center"):
+        #
+        # The gate is shared with the case page rather than restated here. Two
+        # copies drifted once already, and the queue then carried alerts whose
+        # own evidence page reported the check as never having run.
+        if merchant_level_is_comparable(p.metrics, day_count=len(sales)) is None:
             cohort = Baseline(
                 center=p.metrics["peer_center"],
                 dispersion=p.metrics["peer_dispersion"],
@@ -698,21 +907,22 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
             continue
 
         worst = None
-        breaches = 0
-        for amount in _scored_day_amounts(session, p.merchant_id, as_of):
-            score = score_value(amount, baseline)
+        driving: list[ScoredTxn] = []
+        for row in sales:
+            score = score_value(row.amount, baseline)
             # Statistical AND practical significance. A HKD 150 transaction can
             # be a genuine four-sigma outlier at a convenience store and still
             # be worthless to a launderer; firing on the z-score alone is what
             # buried the actionable alerts.
-            if not tune.fires(deviation=score.deviation, amount=amount):
+            if not tune.fires(deviation=score.deviation, amount=row.amount):
                 continue
-            breaches += 1
+            driving.append(row)
             if worst is None or score.deviation > worst.deviation:
                 worst = score
 
         if worst is None:
             continue
+        breaches = len(driving)
 
         hits.append(
             {
@@ -728,11 +938,242 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                     "baseline_value": baseline.center,
                     "deviation": round(worst.deviation, 2),
                 },
+                "contributions": _contributions(
+                    driving, "total_amount",
+                    f"far above this merchant's typical transaction "
+                    f"({baseline.center:,.0f})",
+                ),
                 "breaches": breaches,
             }
         )
 
     return hits
+
+
+def _daily_value(
+    session: Session, merchant_id: str, as_of: datetime, window_days: int
+) -> list[tuple[date, float]]:
+    """Gross settled value per calendar day over the history window.
+
+    Includes the scored day, unlike the baseline windows: bust-out is a
+    trajectory ending in the day being judged, so excluding that day would
+    remove the very point the shape is about.
+    """
+    start, _ = _window_bounds(as_of, window_days)
+    _, end = scored_day_bounds(as_of)
+    rows = session.execute(
+        select(Transaction.occurred_at, Transaction.total_amount).where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            Transaction.is_refund.is_(False),
+        )
+    )
+    per_day: dict[date, float] = {}
+    for occurred_at, amount in rows:
+        day = occurred_at.astimezone(HKT).date()
+        per_day[day] = per_day.get(day, 0.0) + amount
+    return [(day, per_day[day]) for day in sorted(per_day)]
+
+
+def _last_active_before(
+    session: Session, merchant_id: str, as_of: datetime
+) -> date | None:
+    """The last day the merchant traded before the day being scored."""
+    start, _ = scored_day_bounds(as_of)
+    latest = session.scalars(
+        select(Transaction.occurred_at)
+        .where(
+            Transaction.merchant_id == merchant_id,
+            Transaction.occurred_at < start,
+        )
+        .order_by(Transaction.occurred_at.desc())
+        .limit(1)
+    ).first()
+    return latest.astimezone(HKT).date() if latest else None
+
+
+def typology_input_for(
+    session: Session, merchant_id: str, as_of: datetime, metrics: dict
+) -> TypologyInput | None:
+    """Assemble one merchant's Family B input.
+
+    Shared by the nightly run and the case-review screen so a rule can never
+    read one thing in the pipeline and another on the page explaining it.
+    """
+    rows = _scored_day_rows(session, merchant_id, as_of)
+    if not rows:
+        return None
+    merchant = session.get(Merchant, merchant_id)
+    return TypologyInput(
+        merchant_id=merchant_id,
+        mcc=merchant.mcc if merchant else None,
+        day=[
+            Txn(
+                source_txn_id=r.source_txn_id,
+                amount=r.amount,
+                occurred_at=r.occurred_at,
+                hour=r.hour,
+                is_refund=r.is_refund,
+                status=r.status,
+                card_type=r.card_type,
+            )
+            for r in rows
+        ],
+        daily_value=_daily_value(session, merchant_id, as_of, WINDOW_DAYS * 3),
+        last_active=_last_active_before(session, merchant_id, as_of),
+        scored_day=scored_day_bounds(as_of)[0].date(),
+        baseline_center=metrics.get("baseline_center"),
+        cohort_center=metrics.get("peer_center"),
+        cohort_hours=metrics.get("cohort_hours_density") or [],
+        cohort_hours_threshold=metrics.get("cohort_hours_threshold") or 0.0,
+    )
+
+
+def typologies(session: Session, *, as_of: datetime) -> list[dict]:
+    """Stage 4b: run Family B's typology ruleset over every merchant.
+
+    Runs in BOTH lanes, unlike the own-history baselines. A rule needs no
+    fitted history — that is exactly why the cold-start merchants Family A
+    cannot score are the ones this family exists to cover.
+    """
+    rules = active_rules(session, Family.B)
+    if not rules:
+        return []
+
+    hits: list[dict] = []
+
+    for p in session.scalars(select(MerchantProfile)):
+        # A merchant with no activity on the scored day gives no typology
+        # anything to match against.
+        data = typology_input_for(session, p.merchant_id, as_of, p.metrics)
+        if data is None:
+            continue
+
+        for hit in evaluate_typologies(data, rules):
+            hits.append({
+                "merchant_id": p.merchant_id,
+                "lane": lanes_for(p),
+                "detector": hit.template,
+                "rule_id": hit.rule_id,
+                "reason_code": hit.reason_code,
+                "sub_score": hit.sub_score,
+                "message": hit.message,
+                "feature": hit.feature,
+                "contributions": [c.as_dict() for c in hit.contributions],
+            })
+
+    return hits
+
+
+def lanes_for(profile: MerchantProfile) -> str:
+    return "A" if profile.metrics.get("baseline_usable") else "B"
+
+
+def rings(
+    session: Session, *, as_of: datetime, flagged_now: frozenset[str] = frozenset()
+) -> list[dict]:
+    """Stage 4c: run Family C's ring detection across the whole portfolio.
+
+    Portfolio-wide rather than per-merchant by necessity — coordination
+    between merchants is structurally invisible from inside any one of them.
+
+    `hashed_pan` is read here and nowhere else. It never enters a hit, a
+    contribution, or an alert: the evidence names the counterpart merchant and
+    the transaction ids, which is what an analyst needs, without handing anyone
+    a brute-forceable card identifier.
+    """
+    rules = active_rules(session, Family.C)
+    if not rules:
+        return []
+
+    merchants = [
+        MerchantNode(
+            merchant_id=m.merchant_id,
+            mcc=m.mcc,
+            agent_id=m.agent_id,
+            hashed_br_number=m.hashed_br_number,
+            hashed_merchant_address=m.hashed_merchant_address,
+            hashed_merchant_name=m.hashed_merchant_name,
+            subdistrict=m.merchant_subdistrict,
+            district=m.merchant_district,
+        )
+        for m in session.scalars(select(Merchant))
+    ]
+
+    start, end = scored_day_bounds(as_of)
+    # `!= ""` is not redundant with `is_not(None)`. The source writes
+    # `hashed_pan` as an empty string on every wallet rail — a wallet has no
+    # card number to hash — and over half the real extract is a wallet. An
+    # empty string is not NULL, so those rows pass a null check and then all
+    # compare *equal to one another*: one "card" appearing at thousands of
+    # merchants, which every card-linkage rule below reports as a ring.
+    # Ingestion now folds blank to NULL, and this guard covers rows loaded
+    # before it did.
+    events = [
+        CardEvent(
+            pan_key=pan,
+            merchant_id=merchant_id,
+            source_txn_id=txn_id,
+            occurred_at=occurred_at,
+            card_type=card_type,
+        )
+        for pan, merchant_id, txn_id, occurred_at, card_type in session.execute(
+            select(
+                Transaction.hashed_pan,
+                Transaction.merchant_id,
+                Transaction.source_txn_id,
+                Transaction.occurred_at,
+                Transaction.card_type,
+            ).where(
+                Transaction.hashed_pan.is_not(None),
+                Transaction.hashed_pan != "",
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
+                Transaction.is_refund.is_(False),
+            )
+        )
+    ]
+
+    # "Already flagged" spans two things: merchants carrying an alert nobody
+    # has cleared, and merchants Family A or B flagged earlier in *this* run.
+    # The second half matters — alerts are not written until the final stage,
+    # so reading the table alone leaves a first run seeing nothing flagged and
+    # every ring silently below threshold.
+    #
+    # A merchant whose alert was dispositioned as a false positive drops out,
+    # rather than inflating its agent's rate or its ring's severity forever.
+    undecided = ~select(Disposition.id).where(
+        Disposition.alert_id == Alert.id
+    ).exists()
+    flagged = frozenset(
+        session.scalars(select(Alert.merchant_id).where(undecided).distinct())
+    ) | flagged_now
+
+    lanes = {p.merchant_id: lanes_for(p) for p in session.scalars(select(MerchantProfile))}
+
+    return [
+        {
+            "merchant_id": r.merchant_id,
+            "lane": lanes.get(r.merchant_id, "B"),
+            "detector": r.hit.template,
+            "rule_id": r.hit.rule_id,
+            "reason_code": r.hit.reason_code,
+            "sub_score": r.hit.sub_score,
+            "message": r.hit.message,
+            "feature": r.hit.feature,
+            "contributions": [c.as_dict() for c in r.hit.contributions],
+            # The cross-merchant picture: which merchants the card touched,
+            # and for geo-velocity the arithmetic of each impossible leg. One
+            # alert now stands for a whole card, so the alert has to carry
+            # what the other merchants were.
+            "linkage": r.hit.linkage,
+        }
+        for r in evaluate_rings(
+            RingInput(merchants=merchants, card_events=events, flagged=flagged),
+            rules,
+        )
+    ]
 
 
 def score_and_rank(
@@ -743,19 +1184,41 @@ def score_and_rank(
     The feature snapshot is written once and never recomputed — training on
     features rebuilt later would leak the future into the model.
     """
-    ordered = sorted(hits, key=lambda h: h["sub_score"], reverse=True)
+    # Ties broken on merchant then detector so two runs over the same data
+    # produce the same ranks. Sorting on score alone leaves equal-scoring hits
+    # in whatever order the query returned them, which makes `rank` — a column
+    # the audit trail carries — non-reproducible.
+    ordered = sorted(
+        hits,
+        key=lambda h: (-h["sub_score"], h["merchant_id"], h["detector"]),
+    )
     alerts: list[Alert] = []
     for rank, h in enumerate(ordered, start=1):
+        detector_hit = {"detector": h["detector"], "sub_score": h["sub_score"]}
+        # Rules carry the parameters that fired them; baselines do not have
+        # any, so the keys are only written when they mean something.
+        for key in ("rule_id", "reason_code", "message"):
+            if h.get(key):
+                detector_hit[key] = h[key]
+        # The evidence is frozen onto the alert rather than recomputed on
+        # read, for the same reason `feature_snapshot` is: a later run with
+        # retuned thresholds would otherwise rewrite the past.
+        if h.get("contributions"):
+            detector_hit["contributions"] = h["contributions"]
+        # Family C only: the merchants a card connected, and the journey
+        # between them. Frozen for the same reason as everything else here —
+        # a later run's portfolio is a different portfolio.
+        if h.get("linkage"):
+            detector_hit["linkage"] = h["linkage"]
+
         alert = Alert(
             merchant_id=h["merchant_id"],
             as_of=as_of,
             lane=h["lane"],
             blended_score=h["sub_score"],
             rank=rank,
-            triggering_detectors=[
-                {"detector": h["detector"], "sub_score": h["sub_score"]}
-            ],
-            feature_snapshot=[h["feature"]],
+            triggering_detectors=[detector_hit],
+            feature_snapshot=[h["feature"]] if h.get("feature") else [],
         )
         session.add(alert)
         alerts.append(alert)

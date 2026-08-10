@@ -3,10 +3,27 @@ import { useGlossary } from "../api/glossary";
 import type { GlossaryTerm } from "../api/client";
 import { Card, Pill, type Tone } from "../lib/ui";
 
+/** A detector's frame is the head of its `compared_against`; anything after a
+ *  comma refines it ("Own history, per payment method" is still own history).
+ *  Derived rather than listed, so a new frame in the backend appears here
+ *  instead of silently counting zero — which is what happened when the
+ *  glossary was reworded and this screen kept the old strings. */
+function frameOf(comparedAgainst: string | null | undefined): string {
+  return (comparedAgainst ?? "").split(",")[0].trim();
+}
+
 const FRAME_TONE: Record<string, Tone> = {
-  "Its own history": "blue",
-  "Same merchant category": "success",
-  "Same district": "warning",
+  "Own history": "blue",
+  "MCC peer group": "success",
+  "Subdistrict peer group": "warning",
+};
+
+/** The question each frame answers, in the analyst's words. Frames without an
+ *  entry still render — they just show their own name as the heading. */
+const FRAME_QUESTION: Record<string, string> = {
+  "Own history": "Is this unusual for this merchant?",
+  "MCC peer group": "Is this unusual for this line of business?",
+  "Subdistrict peer group": "Is this unusual for this area?",
 };
 
 function TermTable({ terms, showFrame }: { terms: GlossaryTerm[]; showFrame?: boolean }) {
@@ -27,7 +44,9 @@ function TermTable({ terms, showFrame }: { terms: GlossaryTerm[]; showFrame?: bo
             {showFrame && (
               <td className="px-5 py-3">
                 {t.compared_against && (
-                  <Pill tone={FRAME_TONE[t.compared_against] ?? "neutral"}>{t.compared_against}</Pill>
+                  <Pill tone={FRAME_TONE[frameOf(t.compared_against)] ?? "neutral"}>
+                    {t.compared_against}
+                  </Pill>
                 )}
               </td>
             )}
@@ -48,23 +67,24 @@ export default function ModelInfo() {
   const g = useGlossary();
   const [open, setOpen] = useState(false);
   const detectors = g.all?.detectors ?? [];
-  const byFrame = (f: string) => detectors.filter((d) => d.compared_against === f).length;
+
+  const counts = new Map<string, number>();
+  for (const d of detectors) {
+    const f = frameOf(d.compared_against);
+    if (f) counts.set(f, (counts.get(f) ?? 0) + 1);
+  }
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-3">
-        {(
-          [
-            ["Its own history", "Is this unusual for this merchant?", "blue"],
-            ["Same merchant category", "Is this unusual for this line of business?", "success"],
-            ["Same district", "Is this unusual for this area?", "warning"],
-          ] as [string, string, Tone][]
-        ).map(([frame, question, tone]) => (
+        {[...counts].map(([frame, count]) => (
           <div key={frame} className="card p-5">
-            <Pill tone={tone}>{frame}</Pill>
-            <p className="mt-3 text-[1.02rem] font-semibold text-[var(--text-strong)]">{question}</p>
+            <Pill tone={FRAME_TONE[frame] ?? "neutral"}>{frame}</Pill>
+            <p className="mt-3 text-[1.02rem] font-semibold text-[var(--text-strong)]">
+              {FRAME_QUESTION[frame] ?? frame}
+            </p>
             <p className="mt-1 text-[0.9rem] text-[var(--muted)]">
-              {byFrame(frame)} reason{byFrame(frame) === 1 ? "" : "s"} check this.
+              {count} reason{count === 1 ? "" : "s"} check this.
             </p>
           </div>
         ))}
