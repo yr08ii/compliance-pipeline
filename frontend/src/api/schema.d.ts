@@ -68,6 +68,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Runs
+         * @description Every pipeline run, newest first, with the parameters it scored under.
+         *
+         *     The point of comparison when a threshold changes: two runs over one day
+         *     are otherwise indistinguishable, since both carry the same `as_of`.
+         */
+        get: operations["list_runs_api_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/runs/superseded": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Clear Superseded Runs
+         * @description Discard the retired runs for one scored day.
+         *
+         *     Supersession keeps a re-scored day's earlier runs readable, which is
+         *     what makes a threshold change reviewable — but once the comparison has
+         *     been made they are just history, and this is how it gets cleared.
+         *
+         *     Only superseded runs: the run currently speaking for the day is what
+         *     the analysts are working, and clearing it from under them would empty
+         *     the queue. Decided alerts are kept whatever else goes, along with the
+         *     run that raised them — a disposition is a person's judgement, and it
+         *     also quarantines that merchant's day from future baselines, so
+         *     deleting it would quietly readmit confirmed-bad trade as normal.
+         */
+        delete: operations["clear_superseded_runs_api_runs_superseded_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/alerts": {
         parameters: {
             query?: never;
@@ -82,6 +136,13 @@ export interface paths {
          *     Paginated because the queue runs to thousands: loading it whole made
          *     the screen unusable before the first row appeared. Decided alerts drop
          *     out — an analyst's queue should hold only what still needs them.
+         *
+         *     `run_id` switches the question being asked. Without it this is the
+         *     working queue: undecided alerts from whichever run currently speaks for
+         *     each scored day. With it, it is the full output of one named run,
+         *     decided rows included and superseded or not — because comparing what a
+         *     threshold change did to a day means seeing everything both runs raised,
+         *     not the remainder nobody has got to yet.
          */
         get: operations["list_alerts_api_alerts_get"];
         put?: never;
@@ -1072,6 +1133,48 @@ export interface components {
             /** Params */
             params: components["schemas"]["RuleParam"][];
         };
+        /**
+         * RunOut
+         * @description One pipeline run, and the parameters it scored under.
+         *
+         *     `as_of` names the day; it does not identify the run, because re-scoring a
+         *     day under retuned thresholds produces a second run carrying the same one.
+         *     `settings` and `rules` are the copies taken when the run started, so a
+         *     later edit to the thresholds cannot rewrite what this run is recorded as
+         *     having used.
+         */
+        RunOut: {
+            /** Id */
+            id: number;
+            /**
+             * As Of
+             * Format: date-time
+             */
+            as_of: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Superseded At */
+            superseded_at: string | null;
+            /** Is Current */
+            is_current: boolean;
+            /** Alert Count */
+            alert_count: number;
+            /** Label */
+            label: string | null;
+            /** Triggered By */
+            triggered_by: string | null;
+            /** Settings */
+            settings: {
+                [key: string]: unknown;
+            };
+            /** Rules */
+            rules: unknown[];
+        };
         /** StatBlock */
         StatBlock: {
             /** Mean */
@@ -1233,12 +1336,66 @@ export interface operations {
             };
         };
     };
+    list_runs_api_runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunOut"][];
+                };
+            };
+        };
+    };
+    clear_superseded_runs_api_runs_superseded_delete: {
+        parameters: {
+            query: {
+                as_of: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_alerts_api_alerts_get: {
         parameters: {
             query?: {
                 page?: number;
                 page_size?: number;
                 alert_type?: string | null;
+                run_id?: number | null;
             };
             header?: never;
             path?: never;

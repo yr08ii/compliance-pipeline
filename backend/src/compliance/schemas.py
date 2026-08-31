@@ -446,6 +446,31 @@ class RuleSet(BaseModel):
     instances: list[RuleInstanceIn]
 
 
+class RunOut(BaseModel):
+    """One pipeline run, and the parameters it scored under.
+
+    `as_of` names the day; it does not identify the run, because re-scoring a
+    day under retuned thresholds produces a second run carrying the same one.
+    `settings` and `rules` are the copies taken when the run started, so a
+    later edit to the thresholds cannot rewrite what this run is recorded as
+    having used.
+    """
+
+    id: int
+    as_of: datetime
+    started_at: datetime
+    finished_at: datetime | None
+    superseded_at: datetime | None
+    # Whether this run currently speaks for its scored day. A superseded run
+    # keeps its alerts and stays readable; they just leave the working queue.
+    is_current: bool
+    alert_count: int
+    label: str | None
+    triggered_by: str | None
+    settings: dict
+    rules: list
+
+
 class Page(BaseModel):
     """A slice of a list, so a queue of thousands does not arrive at once."""
 

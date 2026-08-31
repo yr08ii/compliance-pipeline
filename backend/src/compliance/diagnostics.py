@@ -19,7 +19,13 @@ from sqlalchemy.orm import Session
 
 from compliance import glossary
 from compliance.detection.baselines import CONSISTENCY_CONSTANT
-from compliance.models import Alert, Merchant, MerchantProfile, Transaction
+from compliance.models import (
+    Alert,
+    CohortSnapshot,
+    Merchant,
+    MerchantProfile,
+    Transaction,
+)
 from compliance.pipeline.merchant_study import (
     fetch_day_data,
     root_cause,
@@ -41,6 +47,15 @@ def scored_date(alert: Alert) -> str:
 
 
 def alert_type(alert: Alert) -> str:
+    """The triage badge for an alert.
+
+    Prefers the column the run cached — the queue filters and counts on it, so
+    the badge must be the same value or the filter hides rows from the analyst
+    who asked for exactly them. Falls back to the derivation for rows written
+    before the column existed.
+    """
+    if alert.alert_type:
+        return alert.alert_type
     detectors = alert.triggering_detectors or []
     first = detectors[0].get("detector", "") if detectors else ""
     return glossary.alert_type_for(first)
@@ -447,28 +462,20 @@ def diagnostics(session: Session, alert: Alert) -> dict:
 
     # Peer amounts for the box plot: each cohort member's typical transaction,
     # so the analyst sees the distribution rather than only its summary.
-    peer_values: list[float] = []
-    if merchant and metrics.get("peer_usable"):
-        peer_ids = list(
-            session.scalars(
-                select(Merchant.merchant_id).where(
-                    Merchant.mcc == merchant.mcc,
-                    Merchant.merchant_id != merchant.merchant_id,
-                )
-            )
-        )
-        for pid in peer_ids[:200]:
-            amounts = list(
-                session.scalars(
-                    select(Transaction.total_amount).where(
-                        Transaction.merchant_id == pid,
-                        Transaction.is_refund.is_(False),
-                    )
-                )
-            )
-            if amounts:
-                peer_values.append(median(amounts))
-        peer_values.sort()
+    #
+    # Read back from the run's fit rather than rebuilt here. Rebuilding cost a
+    # query per member, which is why it had capped itself at 200 of a cohort
+    # that runs to hundreds — and it read all-time history with no quarantine
+    # exclusion, so the points drawn were not the ones the median and fence
+    # were cut from. One row now carries the whole cohort, exactly as fitted.
+    cohort = (
+        session.scalars(
+            select(CohortSnapshot).where(CohortSnapshot.mcc == merchant.mcc)
+        ).first()
+        if merchant
+        else None
+    )
+    peer_values: list[float] = list(cohort.members) if cohort else []
 
     return {
         "alert_id": alert.id,
@@ -494,10 +501,14 @@ def diagnostics(session: Session, alert: Alert) -> dict:
             "merchant_value": metrics.get("baseline_center"),
             "peer_median": metrics.get("peer_center"),
             "peer_dispersion": metrics.get("peer_dispersion"),
-            "peer_q1": peer_values[len(peer_values) // 4] if peer_values else None,
-            "peer_q3": peer_values[3 * len(peer_values) // 4] if peer_values else None,
+            # The fitted quartiles, not an index into a sample of the cohort.
+            "peer_q1": cohort.q1 if cohort else None,
+            "peer_q3": cohort.q3 if cohort else None,
             "peer_upper_fence": metrics.get("peer_fence"),
-            "n_merchants": metrics.get("peer_merchants") or 0,
+            # Reported from the same set that is drawn, so the count on the
+            # screen and the points on the plot cannot describe different
+            # cohorts.
+            "n_merchants": len(peer_values),
             "peer_values": peer_values,
         },
         "window": {

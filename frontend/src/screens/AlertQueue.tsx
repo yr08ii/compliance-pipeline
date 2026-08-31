@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiGet, type AlertPage } from "../api/client";
+import { apiGet, type AlertPage, type RunOut } from "../api/client";
 import { useGlossary } from "../api/glossary";
 import { Card, ErrorNote, Pager, Pill, type Tone } from "../lib/ui";
 import { IconChevron } from "../lib/icons";
+import RunPicker from "./RunPicker";
 import { cn } from "../lib/utils";
 
 const TYPE_TONE: Record<string, Tone> = {
@@ -16,12 +17,16 @@ const TYPE_TONE: Record<string, Tone> = {
   // badges rather than being folded into the four above.
   typology_match: "danger",
   ring_signal: "navy",
+  // Attempts that moved no money. Its own badge because the analyst opens it
+  // expecting a terminal being tested, not a large sale to explain.
+  failed_txn_rate: "warning",
 };
 
 const TYPE_ORDER = [
   "single_txn_spike",
   "typology_match",
   "ring_signal",
+  "failed_txn_rate",
   "mcc_peer_discrepancy",
   "subdistrict_anomaly",
   "temporal_anomaly",
@@ -36,6 +41,16 @@ export default function AlertQueue() {
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [runs, setRuns] = useState<RunOut[]>([]);
+  // Which run the queue is showing. null is the working queue: whatever
+  // currently speaks for each scored day.
+  const [viewing, setViewing] = useState<number | null>(null);
+
+  const refreshRuns = useCallback(() => {
+    apiGet<RunOut[]>("/api/runs").then(setRuns).catch(() => undefined);
+  }, []);
+
+  useEffect(refreshRuns, [refreshRuns]);
 
   // Counted server-side across the whole queue: tallying only the visible
   // page would make these chips lie about what is waiting.
@@ -48,8 +63,9 @@ export default function AlertQueue() {
   useEffect(() => {
     const query = new URLSearchParams({ page: String(page), page_size: "20" });
     if (filter) query.set("alert_type", filter);
+    if (viewing != null) query.set("run_id", String(viewing));
     apiGet<AlertPage>(`/api/alerts?${query}`).then(setData).catch((e) => setError(String(e)));
-  }, [page, filter]);
+  }, [page, filter, viewing]);
 
   if (error) return <ErrorNote>Failed to load alerts: {error}</ErrorNote>;
 
@@ -58,7 +74,21 @@ export default function AlertQueue() {
 
   return (
     <div className="space-y-4">
-      {counts?.scored_date && (
+      <RunPicker
+        runs={runs}
+        viewing={viewing}
+        onView={(runId) => {
+          setViewing(runId);
+          setPage(1);
+          setFilter(null);
+        }}
+        onCleared={() => {
+          refreshRuns();
+          refreshCounts();
+        }}
+      />
+
+      {viewing == null && counts?.scored_date && (
         <Card>
           <p className="px-5 py-3.5 text-[0.92rem] text-[var(--text)]">
             Evaluating{" "}
@@ -77,6 +107,11 @@ export default function AlertQueue() {
         </Card>
       )}
 
+      {/* Counted across the working queue, so they say nothing about a past
+          run — showing "All 7173" above a two-row table would be a plain
+          contradiction. Triage happens on the current queue; a past run is
+          opened to compare, not to work. */}
+      {viewing == null && (
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
@@ -118,14 +153,23 @@ export default function AlertQueue() {
           );
         })}
       </div>
+      )}
 
       <Card
         title={
-          filter
-            ? `${g.alertType(filter)} — ${data?.total ?? 0} awaiting review`
-            : `${data?.total ?? 0} alerts awaiting review`
+          viewing != null
+            ? `Run ${viewing} — ${data?.total ?? 0} alert${
+                (data?.total ?? 0) === 1 ? "" : "s"
+              } raised`
+            : filter
+              ? `${g.alertType(filter)} — ${data?.total ?? 0} awaiting review`
+              : `${data?.total ?? 0} alerts awaiting review`
         }
-        subtitle="Highest blended risk first. Alerts leave this list once decided."
+        subtitle={
+          viewing != null
+            ? "Everything this run raised, including alerts already decided."
+            : "Highest blended risk first. Alerts leave this list once decided."
+        }
       >
         {!data ? (
           <p className="px-5 py-10 text-center text-[0.9rem] text-[var(--muted)]">Loading…</p>

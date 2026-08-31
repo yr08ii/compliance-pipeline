@@ -23,18 +23,20 @@ export type CardLink = components["schemas"]["CardLink"];
 export type LinkedRow = components["schemas"]["LinkedRow"];
 export type GeoLeg = components["schemas"]["GeoLeg"];
 export type TrailMerchant = components["schemas"]["TrailMerchant"];
+export type RunOut = components["schemas"]["RunOut"];
 
 /** POST/PUT helper. Throws with the server's message so a failed decision
  *  surfaces the reason rather than failing silently. */
 export async function apiSend<T>(
   path: string,
   body: unknown,
-  method: "POST" | "PUT" = "POST"
+  method: "POST" | "PUT" | "DELETE" = "POST"
 ): Promise<T> {
   const resp = await fetch(path, {
     method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    // A DELETE carries no body; sending "null" makes some servers 422.
+    ...(body === null ? {} : { body: JSON.stringify(body) }),
   });
   if (!resp.ok) {
     let detail = `${resp.status} ${resp.statusText}`;

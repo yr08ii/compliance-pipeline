@@ -65,9 +65,11 @@ DETECTORS: tuple[Term, ...] = (
     ),
     Term(
         "card_origin_vs_own_mix",
-        "Card origin vs own history",
-        "Transactions on cards issued in a country this merchant rarely or never sees.",
-        "Own history",
+        "Overseas card origin vs own history",
+        "Transactions on cards issued in an overseas country this merchant rarely or "
+        "never sees. Home-issued cards and wallet rails are outside this check — it "
+        "watches which foreign countries pay, and whether that has changed.",
+        "Own history of overseas cards",
     ),
     Term(
         "ticket_vs_mcc_peers",
@@ -108,10 +110,28 @@ DETECTORS: tuple[Term, ...] = (
         "Own history, per payment method",
     ),
     Term(
+        "unsettled_ratio_vs_own_baseline",
+        "Failed-transaction rate vs own history",
+        "A higher share of attempts than usual for this merchant never "
+        "settled — declined, cancelled, reversed or voided. Catches a change, "
+        "not a level: a trade that always runs hot is not news until it moves.",
+        "Own history",
+    ),
+    Term(
+        "unsettled_ratio_vs_mcc_peers",
+        "Failed-transaction rate vs MCC peers",
+        "A higher share of attempts never settled than for merchants in the "
+        "same category. Catches a level rather than a change: card-not-present "
+        "trades fail more than tills do, so only the cohort can say what is "
+        "remarkable.",
+        "MCC peer group",
+    ),
+    Term(
         "foreign_card_ratio_vs_subdistrict",
         "Overseas card share vs subdistrict baseline",
-        "A far higher share of transactions on overseas-issued cards than other merchants "
-        "in the same district.",
+        "A far higher share of card transactions on overseas-issued cards than other "
+        "merchants in the same district. Measured over cards only — wallet rails have "
+        "no issuing country and are not counted on either side of the share.",
         "Subdistrict peer group",
     ),
     # ---- Family B: typology rules. These match a pattern rather than measure
@@ -210,6 +230,12 @@ DETECTORS: tuple[Term, ...] = (
 FEATURES: tuple[Term, ...] = (
     Term("ticket_amount", "Transaction amount",
          "The value of a single transaction.", ""),
+    Term("unsettled_share_vs_own_history", "Share of attempts that failed",
+         "Transactions that never settled — declined, cancelled, reversed or "
+         "voided — as a share of every attempt that day.", ""),
+    Term("unsettled_share_vs_mcc_peers", "Share of attempts that failed",
+         "Transactions that never settled — declined, cancelled, reversed or "
+         "voided — as a share of every attempt that day.", ""),
     Term("daily_transaction_count", "Number of transactions",
          "How many transactions the merchant processed that day.", ""),
     Term("peak_transactions_per_hour", "Transactions per hour (peak)",
@@ -313,6 +339,13 @@ ALERT_TYPES: tuple[Term, ...] = (
     Term("ring_signal", "Ring signal",
          "This merchant is linked to others: shared identity, a shared "
          "onboarding agent, or a card connecting them.", ""),
+    # Its own badge rather than folded into the spike types: a failure rate is
+    # about attempts that moved no money, so an analyst opens it expecting a
+    # terminal being tested rather than a large sale to explain.
+    Term("failed_txn_rate", "Failed-transaction rate",
+         "An unusual share of attempts that never settled — declined, "
+         "cancelled, reversed or voided. The merchant-side read of a terminal "
+         "being used to test cards.", ""),
 )
 
 # Which badge each detector belongs to. Deliberately exhaustive: a detector
@@ -331,6 +364,8 @@ DETECTOR_ALERT_TYPE: dict[str, str] = {
     "hour_vs_mcc_peers": "temporal_anomaly",
     "ticket_vs_subdistrict_peers": "subdistrict_anomaly",
     "foreign_card_ratio_vs_subdistrict": "subdistrict_anomaly",
+    "unsettled_ratio_vs_own_baseline": "failed_txn_rate",
+    "unsettled_ratio_vs_mcc_peers": "failed_txn_rate",
     # Family B — every typology rule.
     "structuring_below_threshold": "typology_match",
     "refund_ratio_spike": "typology_match",

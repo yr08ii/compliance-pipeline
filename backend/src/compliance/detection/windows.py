@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from compliance.detection.baselines import (
@@ -28,6 +28,61 @@ from compliance.detection.baselines import (
     fit_peer_baseline,
 )
 from compliance.models import Alert, Disposition, Merchant, Transaction
+
+# Where the portfolio trades. A card issued here is a home card; everything
+# else is overseas.
+HOME_COUNTRY = "HK"
+
+# Outcomes where no value reached the merchant. Enumerated rather than defined
+# as "not SUCCESS": the extract also carries AUTHORIZED, PENDING, and rows with
+# no status at all, whose outcome is unknown. Unknown is not failed, and
+# counting it as failed would be a claim the data does not make.
+UNSETTLED_STATUSES = ("DECLINED", "CANCELLED", "REVERSED", "VOIDED")
+
+
+def settled_sale():
+    """Rows where value actually moved to the merchant.
+
+    Every baseline is a statement about what this merchant's trade normally
+    looks like, and an attempt that failed is not trade. The distortion was not
+    even-handed: a declined transaction averages HKD 1,355 against HKD 253 for
+    a successful one, so failures pulled ticket baselines upward — and they
+    counted as ordinary volume, which taught the volume baseline that a burst
+    of declines is a normal day. That burst is the card-testing pattern the
+    decline rule exists to catch.
+
+    Rows with no status are kept. They are 8,078 of the extract and their
+    outcome is simply not recorded; dropping them would discard data on the
+    strength of a guess, in the direction that quietly shrinks every baseline.
+    """
+    return (
+        Transaction.is_refund.is_(False),
+        or_(
+            Transaction.transaction_status.is_(None),
+            Transaction.transaction_status.not_in(UNSETTLED_STATUSES),
+        ),
+    )
+
+
+def has_card_origin():
+    """Rows that name a real issuing country.
+
+    Over half the extract is a wallet rail — Alipay, Octopus, WeChat Pay,
+    PayMe — and a wallet has no card to have been issued anywhere, so the
+    source writes `card_issuing_country` as an empty string. An empty string
+    is not NULL: it passed every null check and then compared unequal to "HK",
+    so each wallet tap counted as a foreign-issued card. On the scored day that
+    put the portfolio's mean foreign share at 53% against a true 10%.
+
+    Keyed on the absent country rather than on a list of wallet rails, so a
+    rail added to the extract tomorrow is handled without a code change — and
+    so the card transactions whose origin the extract simply does not carry are
+    excluded too, which is the same statement: origin unknown, no vote.
+    """
+    return (
+        Transaction.card_issuing_country.is_not(None),
+        Transaction.card_issuing_country != "",
+    )
 
 
 def _window_bounds(
@@ -95,7 +150,7 @@ def amounts_in_window(
             Transaction.merchant_id == merchant_id,
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
         .order_by(Transaction.occurred_at)
     )
@@ -129,7 +184,7 @@ def fit_all_baselines(
         .where(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
         .order_by(Transaction.merchant_id, Transaction.occurred_at)
     )
@@ -193,7 +248,7 @@ def fit_payment_method_baselines(
             Transaction.card_type.is_not(None),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
 
@@ -245,7 +300,7 @@ def fit_peer_baselines(
         .where(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
 
@@ -293,7 +348,7 @@ def daily_counts_in_window(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -321,7 +376,7 @@ def fit_volume_baselines(
         .where(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
         .order_by(Transaction.merchant_id, Transaction.occurred_at)
     )
@@ -367,7 +422,7 @@ def fit_peer_volume_baselines(
         .where(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
 
@@ -430,7 +485,7 @@ def daily_peak_rate(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -462,7 +517,7 @@ def fit_velocity_baselines(
         .where(
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
         .order_by(Transaction.merchant_id, Transaction.occurred_at)
     )
@@ -536,7 +591,7 @@ def fit_peer_transaction_baselines(
             key.is_not(None),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
         .order_by(key, Transaction.merchant_id, Transaction.occurred_at)
     )
@@ -567,7 +622,7 @@ def fit_peer_foreign_ratio_baselines(
     *,
     lag_days: int = 0,
     dimension: str = "subdistrict",
-    home_country: str = "HK",
+    home_country: str = HOME_COUNTRY,
     exclude_quarantined: bool = True,
 ) -> dict[str, Baseline]:
     """Fit each district's normal share of foreign-issued cards.
@@ -576,6 +631,11 @@ def fit_peer_foreign_ratio_baselines(
     day and a residential grocer does not. What matters is a merchant sitting
     far from the norm *for where it trades*, which only a district cohort can
     say. One ratio per merchant, so a busy member cannot define the district.
+
+    Built over card transactions only, exactly as `merchant_foreign_ratio` is.
+    The two must share a definition: a norm assembled one way and a merchant
+    value assembled another are not the same quantity, and the comparison
+    between them means nothing.
     """
     from statistics import median as _median
 
@@ -587,10 +647,10 @@ def fit_peer_foreign_ratio_baselines(
         .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
         .where(
             key.is_not(None),
-            Transaction.card_issuing_country.is_not(None),
+            *has_card_origin(),
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
 
@@ -616,9 +676,23 @@ def fit_peer_foreign_ratio_baselines(
 
 
 def merchant_foreign_ratio(
-    session: Session, merchant_id: str, as_of: datetime, home_country: str = "HK"
+    session: Session,
+    merchant_id: str,
+    as_of: datetime,
+    home_country: str = HOME_COUNTRY,
 ) -> float | None:
-    """Share of the scored day's transactions on foreign-issued cards."""
+    """Share of the scored day's *card* transactions on foreign-issued cards.
+
+    Wallet rails take no part, on either side of the division. They are not
+    cards and have no issuing country, so counting them in the denominator
+    understates the share and counting them in the numerator — which is what
+    the missing empty-string guard used to do — inverts the measure entirely.
+
+    None, not zero, for a merchant that took no cards at all: roughly a fifth
+    of the portfolio trades on wallets alone on any given day, and a fabricated
+    zero would enter those merchants into a district comparison on a quantity
+    nobody measured.
+    """
     from compliance.pipeline.stages import scored_day_bounds
 
     start, end = scored_day_bounds(as_of)
@@ -628,14 +702,185 @@ def merchant_foreign_ratio(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
-                Transaction.card_issuing_country.is_not(None),
+                *settled_sale(),
+                *has_card_origin(),
             )
         )
     )
     if not countries:
         return None
     return sum(1 for c in countries if c != home_country) / len(countries)
+
+
+def _unsettled_attempts():
+    """Every attempt to move value, settled or not.
+
+    The denominator of the unsettled share, and deliberately not
+    `settled_sale()` — this is the one measure whose subject is the failures
+    themselves, so filtering them out would leave it measuring nothing.
+    """
+    return ()
+
+
+def _daily_unsettled_ratios(
+    rows: list[tuple[datetime, str | None]],
+) -> list[float]:
+    """One unsettled share per day the merchant attempted anything.
+
+    Per day rather than pooled over the window: a merchant's failure rate is a
+    daily property, and pooling would let one heavy day set the level for all
+    of them. Quiet days are simply absent — a day with no attempts has no
+    share, which is not the same as a share of zero.
+    """
+    per_day: dict[date, list[bool]] = {}
+    for occurred_at, status in rows:
+        per_day.setdefault(occurred_at.date(), []).append(
+            status in UNSETTLED_STATUSES
+        )
+    return [
+        sum(outcomes) / len(outcomes)
+        for outcomes in per_day.values()
+        if outcomes
+    ]
+
+
+def fit_unsettled_ratio_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    min_observations: int,
+    lag_days: int = 0,
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit each merchant's own daily share of attempts that did not settle.
+
+    Family B already carries a fixed threshold on the absolute decline rate.
+    This is the complement and answers the other question: not whether the rate
+    is bad, but whether it is a change. A merchant whose trade has always run a
+    fifth declined is not news; the same merchant at four fifths is, and a
+    single portfolio-wide threshold sees only one of those.
+
+    Floored dispersion, as the other ratio baselines are: a merchant whose
+    failure rate is genuinely identical every day has zero spread, which is
+    ordinary rather than degenerate, and without the floor nothing would ever
+    be measurable against it.
+    """
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(
+            Transaction.merchant_id,
+            Transaction.occurred_at,
+            Transaction.transaction_status,
+        ).where(
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            *_unsettled_attempts(),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    per_merchant: dict[str, list[tuple[datetime, str | None]]] = {}
+    for merchant_id, occurred_at, status in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        per_merchant.setdefault(merchant_id, []).append((occurred_at, status))
+
+    return {
+        merchant_id: fit_baseline(
+            _daily_unsettled_ratios(per_merchant.get(merchant_id, [])),
+            min_observations=min_observations,
+            min_dispersion=MIN_RATIO_DISPERSION,
+        )
+        for merchant_id in session.scalars(select(Merchant.merchant_id))
+    }
+
+
+def fit_peer_unsettled_ratio_baselines(
+    session: Session,
+    as_of: datetime,
+    window_days: int,
+    *,
+    lag_days: int = 0,
+    dimension: str = "mcc",
+    exclude_quarantined: bool = True,
+) -> dict[str, Baseline]:
+    """Fit each cohort's normal share of attempts that did not settle.
+
+    Trades differ in how much they legitimately fail — a card-not-present
+    business declines far more than a supermarket till — so a portfolio-wide
+    number would either excuse the first or condemn the second. One ratio per
+    merchant, so a high-volume member cannot define its own cohort.
+    """
+    key = _cohort_column(dimension)
+    start, end = _window_bounds(as_of, window_days, lag_days)
+    rows = session.execute(
+        select(
+            key,
+            Transaction.merchant_id,
+            Transaction.occurred_at,
+            Transaction.transaction_status,
+        )
+        .join(Transaction, Transaction.merchant_id == Merchant.merchant_id)
+        .where(
+            key.is_not(None),
+            Transaction.occurred_at >= start,
+            Transaction.occurred_at < end,
+            *_unsettled_attempts(),
+        )
+    )
+
+    quarantined = quarantined_days(session) if exclude_quarantined else set()
+
+    tally: dict[str, dict[str, list[int]]] = {}
+    for group, merchant_id, occurred_at, status in rows:
+        if (merchant_id, occurred_at.date()) in quarantined:
+            continue
+        seen = tally.setdefault(group, {}).setdefault(merchant_id, [0, 0])
+        seen[0] += 1
+        seen[1] += status in UNSETTLED_STATUSES
+
+    cohorts: dict[str, Baseline] = {}
+    for group, members in tally.items():
+        ratios = [
+            unsettled / attempts
+            for attempts, unsettled in members.values()
+            if attempts
+        ]
+        cohorts[group] = fit_baseline(
+            ratios,
+            min_observations=MIN_COHORT_MERCHANTS,
+            min_dispersion=MIN_RATIO_DISPERSION,
+        )
+    return cohorts
+
+
+def merchant_unsettled_ratio(
+    session: Session, merchant_id: str, as_of: datetime
+) -> float | None:
+    """Share of the scored day's attempts that did not settle.
+
+    None for a merchant that attempted nothing. Not zero: a silent day is the
+    absence of a measurement, and a fabricated zero would enter the merchant
+    into a cohort comparison on a number nobody observed.
+    """
+    from compliance.pipeline.stages import scored_day_bounds
+
+    start, end = scored_day_bounds(as_of)
+    statuses = list(
+        session.scalars(
+            select(Transaction.transaction_status).where(
+                Transaction.merchant_id == merchant_id,
+                Transaction.occurred_at >= start,
+                Transaction.occurred_at < end,
+                *_unsettled_attempts(),
+            )
+        )
+    )
+    if not statuses:
+        return None
+    return sum(1 for s in statuses if s in UNSETTLED_STATUSES) / len(statuses)
 
 
 def fit_trend(

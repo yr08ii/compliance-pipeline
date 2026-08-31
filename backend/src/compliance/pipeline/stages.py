@@ -11,10 +11,15 @@ an audit requirement, not a preference.
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from compliance.detection.baselines import Baseline, DispersionMethod, score_value
+from compliance.detection.baselines import (
+    Baseline,
+    DispersionMethod,
+    PeerBaseline,
+    score_value,
+)
 from compliance.detection.evidence import Contribution
 from compliance.detection.profiles import (
     OriginMix,
@@ -40,6 +45,13 @@ from compliance.detection.windows import (
     fit_peer_foreign_ratio_baselines,
     fit_peer_transaction_baselines,
     merchant_foreign_ratio,
+    merchant_unsettled_ratio,
+    has_card_origin,
+    HOME_COUNTRY,
+    settled_sale,
+    fit_unsettled_ratio_baselines,
+    fit_peer_unsettled_ratio_baselines,
+    UNSETTLED_STATUSES,
     fit_peer_volume_baselines,
     fit_trend,
     fit_velocity_baselines,
@@ -58,8 +70,19 @@ from compliance.detection.typology import (
     TypologyInput,
     evaluate as evaluate_typologies,
 )
-from compliance.models import Alert, Disposition, Merchant, MerchantProfile, Transaction
+from compliance.glossary import alert_type_for
+from compliance.models import (
+    Alert,
+    CohortSnapshot,
+    Disposition,
+    Merchant,
+    MerchantProfile,
+    PipelineRun,
+    Transaction,
+    utcnow,
+)
 from compliance.pipeline.merchant_study import merchant_level_is_comparable
+from compliance import rules_store
 from compliance.rules_store import active_rules
 from compliance.settings_store import load_settings
 
@@ -96,6 +119,8 @@ PEER_HOUR_DETECTOR = "hour_vs_mcc_peers"
 PEER_DISTRICT_AMOUNT_DETECTOR = "ticket_vs_subdistrict_peers"
 PEER_FOREIGN_DETECTOR = "foreign_card_ratio_vs_subdistrict"
 RAIL_DETECTOR = "amount_vs_payment_method_baseline"
+UNSETTLED_DETECTOR = "unsettled_ratio_vs_own_baseline"
+PEER_UNSETTLED_DETECTOR = "unsettled_ratio_vs_mcc_peers"
 
 
 def profile(session: Session, *, as_of: datetime) -> None:
@@ -143,6 +168,13 @@ def profile(session: Session, *, as_of: datetime) -> None:
     foreign_ratios = fit_peer_foreign_ratio_baselines(
         session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
     )
+    unsettled = fit_unsettled_ratio_baselines(
+        session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS,
+        lag_days=LAG_DAYS,
+    )
+    peer_unsettled = fit_peer_unsettled_ratio_baselines(
+        session, as_of, WINDOW_DAYS, lag_days=LAG_DAYS
+    )
     velocities = fit_velocity_baselines(
         session, as_of, WINDOW_DAYS, min_observations=MIN_OBSERVATIONS, lag_days=LAG_DAYS
     )
@@ -160,6 +192,8 @@ def profile(session: Session, *, as_of: datetime) -> None:
         cohort_hour = cohort_hours.get(merchant.mcc) if merchant else None
         district_txn = district_txns.get(district) if district else None
         foreign = foreign_ratios.get(district) if district else None
+        unsettled_own = unsettled.get(merchant_id)
+        unsettled_peer = peer_unsettled.get(merchant.mcc) if merchant else None
         trend = fit_trend(
             session,
             merchant_id,
@@ -224,6 +258,25 @@ def profile(session: Session, *, as_of: datetime) -> None:
                     "foreign_center": foreign.center if foreign else None,
                     "foreign_dispersion": foreign.dispersion if foreign else None,
                     "foreign_usable": bool(foreign and foreign.usable),
+                    "unsettled_center": (
+                        unsettled_own.center if unsettled_own else None
+                    ),
+                    "unsettled_dispersion": (
+                        unsettled_own.dispersion if unsettled_own else None
+                    ),
+                    "unsettled_n": unsettled_own.n if unsettled_own else 0,
+                    "unsettled_usable": bool(
+                        unsettled_own and unsettled_own.usable
+                    ),
+                    "peer_unsettled_center": (
+                        unsettled_peer.center if unsettled_peer else None
+                    ),
+                    "peer_unsettled_dispersion": (
+                        unsettled_peer.dispersion if unsettled_peer else None
+                    ),
+                    "peer_unsettled_usable": bool(
+                        unsettled_peer and unsettled_peer.usable
+                    ),
                     # The estimated density is stored so an auditor can see the
                     # pattern an alert was judged against. At full merchant
                     # scale this should be handed between stages in memory
@@ -255,7 +308,51 @@ def profile(session: Session, *, as_of: datetime) -> None:
                 },
             )
         )
+
+    _persist_cohorts(session, peers, as_of=as_of, window=(window_start, window_end))
     session.flush()
+
+
+def _persist_cohorts(
+    session: Session,
+    peers: dict[str, PeerBaseline],
+    *,
+    as_of: datetime,
+    window: tuple[datetime, datetime],
+) -> None:
+    """Keep each MCC cohort whole, so the case page can show it.
+
+    Written here rather than rebuilt on read because this is where the time
+    is: the run has the night, and an analyst opening a case has a moment.
+    Storing the fit also settles which cohort is the real one — the page now
+    shows the distribution the detector actually used, over the same window
+    and with the same days quarantined, instead of a fresh approximation of it.
+
+    Cleared first, for the same reason the profiles are: a run states the
+    current cohort, and leftovers from a prior one would sit alongside it.
+    """
+    for stale in session.scalars(select(CohortSnapshot)):
+        session.delete(stale)
+    session.flush()
+
+    window_start, window_end = window
+    for mcc, peer in peers.items():
+        session.add(
+            CohortSnapshot(
+                as_of=as_of,
+                mcc=mcc,
+                center=peer.center,
+                dispersion=peer.dispersion,
+                q1=peer.q1,
+                q3=peer.q3,
+                upper_fence=peer.upper_fence() if peer.usable else None,
+                n_merchants=peer.n_merchants,
+                usable=peer.usable,
+                members=list(peer.members),
+                window_start=window_start,
+                window_end=window_end,
+            )
+        )
 
 
 def route(session: Session) -> dict[str, str]:
@@ -416,7 +513,7 @@ def _scored_day_peak_rate(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -431,13 +528,20 @@ def _scored_day_hours(session: Session, merchant_id: str, as_of: datetime) -> li
             select(Transaction.occurred_at).where(
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= as_of,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     ]
 
 
 def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> list[str]:
+    """The scored day's overseas issuing countries.
+
+    Scoped identically to `fit_origin_mix`. A day scored on a wider set than
+    the baseline was fitted on would put home cards and wallet taps through a
+    distribution that contains neither, and every one of them would come back
+    unfamiliar.
+    """
     start, end = scored_day_bounds(as_of)
     return [
         o for o in session.scalars(
@@ -445,8 +549,9 @@ def _scored_day_origins(session: Session, merchant_id: str, as_of: datetime) -> 
                 Transaction.merchant_id == merchant_id,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
-                Transaction.card_issuing_country.is_not(None),
+                *settled_sale(),
+                Transaction.card_issuing_country != HOME_COUNTRY,
+                *has_card_origin(),
             )
         )
     ]
@@ -464,7 +569,7 @@ def _scored_day_amounts_for_rail(
                 Transaction.card_type == rail,
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
-                Transaction.is_refund.is_(False),
+                *settled_sale(),
             )
         )
     )
@@ -635,7 +740,10 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
         # the signal — an airport shop always sees tourists; a change is.
         if p.metrics.get("origin_usable"):
             mix = OriginMix(dict(p.metrics["origin_counts"]), p.metrics["origin_n"])
-            with_origin = [r for r in sales if r.country]
+            # Overseas cards only, matching the sample the mix was fitted on.
+            with_origin = [
+                r for r in sales if r.country and r.country != HOME_COUNTRY
+            ]
             today = [r.country for r in with_origin]
             scored = [(o, origin_surprisal(o, mix)) for o in set(today)]
             flagged = [(o, s) for o, s in scored if s > SURPRISAL_FLAG]
@@ -734,6 +842,82 @@ def detect(session: Session, lanes: dict[str, str], *, as_of: datetime) -> list[
                         breaching, "total_amount",
                         f"above what merchants in this district normally take "
                         f"(typical {dist_base.center:,.0f})",
+                    ),
+                })
+
+        # Unsettled share, against this merchant's own history and against its
+        # trade. Both are needed and neither replaces the other: a card-not-
+        # present business legitimately fails more often than a supermarket
+        # till, so only the cohort can say whether a level is remarkable — and
+        # a merchant that has always run hot is only news when it changes,
+        # which only its own history can say.
+        unsettled_ratio = None
+        if p.metrics.get("unsettled_usable") or p.metrics.get(
+            "peer_unsettled_usable"
+        ):
+            unsettled_ratio = merchant_unsettled_ratio(session, p.merchant_id, as_of)
+
+        if unsettled_ratio is not None and p.metrics.get("unsettled_usable"):
+            own_base = Baseline(
+                center=p.metrics["unsettled_center"],
+                dispersion=p.metrics["unsettled_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics["unsettled_n"],
+            )
+            own_score = score_value(unsettled_ratio, own_base)
+            # One-sided: failing *less* than usual is not a compliance finding.
+            if own_score.is_outlier and unsettled_ratio > own_base.center:
+                failed = [
+                    r for r in day_rows if r.status in UNSETTLED_STATUSES
+                ]
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": UNSETTLED_DETECTOR,
+                    "sub_score": min(own_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "unsettled_share_vs_own_history",
+                        "merchant_value": round(unsettled_ratio, 4),
+                        "baseline_value": round(own_base.center, 4),
+                        "deviation": round(own_score.deviation, 2),
+                    },
+                    # The failed attempts themselves, with the status that
+                    # makes each one a failure — so the ledger highlights the
+                    # outcome column rather than the whole row.
+                    "contributions": _contributions(
+                        failed, "transaction_status",
+                        f"did not settle, against this merchant's usual "
+                        f"{own_base.center:.1%}",
+                    ),
+                })
+
+        if unsettled_ratio is not None and p.metrics.get("peer_unsettled_usable"):
+            peer_base = Baseline(
+                center=p.metrics["peer_unsettled_center"],
+                dispersion=p.metrics["peer_unsettled_dispersion"],
+                method=DispersionMethod.MAD,
+                n=p.metrics.get("peer_merchants") or 0,
+            )
+            peer_score = score_value(unsettled_ratio, peer_base)
+            if peer_score.is_outlier and unsettled_ratio > peer_base.center:
+                failed = [
+                    r for r in day_rows if r.status in UNSETTLED_STATUSES
+                ]
+                hits.append({
+                    "merchant_id": p.merchant_id,
+                    "lane": lanes.get(p.merchant_id, "B"),
+                    "detector": PEER_UNSETTLED_DETECTOR,
+                    "sub_score": min(peer_score.deviation / 10.0, 1.0),
+                    "feature": {
+                        "feature_name": "unsettled_share_vs_mcc_peers",
+                        "merchant_value": round(unsettled_ratio, 4),
+                        "baseline_value": round(peer_base.center, 4),
+                        "deviation": round(peer_score.deviation, 2),
+                    },
+                    "contributions": _contributions(
+                        failed, "transaction_status",
+                        f"did not settle, against an MCC norm of "
+                        f"{peer_base.center:.1%}",
                     ),
                 })
 
@@ -966,7 +1150,7 @@ def _daily_value(
             Transaction.merchant_id == merchant_id,
             Transaction.occurred_at >= start,
             Transaction.occurred_at < end,
-            Transaction.is_refund.is_(False),
+            *settled_sale(),
         )
     )
     per_day: dict[date, float] = {}
@@ -1130,6 +1314,11 @@ def rings(
                 Transaction.hashed_pan != "",
                 Transaction.occurred_at >= start,
                 Transaction.occurred_at < end,
+                # Deliberately not `settled_sale()`. Ring detection asks where
+                # a card was presented, not where it succeeded — and a card
+                # declined at merchant after merchant is the card-testing ring
+                # this family exists to find. Filtering failures out here would
+                # blind it to its strongest case.
                 Transaction.is_refund.is_(False),
             )
         )
@@ -1176,14 +1365,82 @@ def rings(
     ]
 
 
+def open_run(
+    session: Session,
+    *,
+    as_of: datetime,
+    label: str | None = None,
+    triggered_by: str | None = None,
+) -> PipelineRun:
+    """Start a run, recording the parameters it will score under.
+
+    Captured at the start rather than referenced later: thresholds and rules
+    live in tables the compliance lead can edit without a deploy, so a
+    reference would resolve to whatever is current when someone reads it and
+    attribute the wrong settings to the alerts this run is about to raise.
+    """
+    run = PipelineRun(
+        as_of=as_of,
+        settings=load_settings(session).as_dict(),
+        rules=[r.as_dict() for r in rules_store.load_rules(session)],
+        label=label,
+        triggered_by=triggered_by,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def supersede_previous_runs(session: Session, *, as_of: datetime, keep: int) -> int:
+    """Retire the runs that previously spoke for this scored day.
+
+    Retiring, not deleting. Four runs over one day once stacked 88,065 alerts
+    into a queue carrying about 7,000 distinct findings, so only one run may
+    hold the queue at a time — but the superseded ones stay readable, because
+    the reason to re-score a day is usually that a parameter changed, and the
+    question that follows is what it changed.
+
+    Decided alerts are unaffected either way: a disposition is a judgement
+    someone made, and it stays in the queue's history whatever became of the
+    run that raised it.
+    """
+    result = session.execute(
+        update(PipelineRun)
+        .where(
+            PipelineRun.as_of == as_of,
+            PipelineRun.id != keep,
+            PipelineRun.superseded_at.is_(None),
+        )
+        .values(superseded_at=utcnow())
+    )
+    session.flush()
+    return result.rowcount or 0
+
+
 def score_and_rank(
-    session: Session, hits: list[dict], *, as_of: datetime | None = None
+    session: Session,
+    hits: list[dict],
+    *,
+    as_of: datetime | None = None,
+    run: PipelineRun | None = None,
 ) -> list[Alert]:
     """Stage 5: one alert per flagged merchant, ranked, with its snapshot.
+
+    Every alert is stamped with the run that raised it, and that run becomes
+    the current statement about its scored day — the runs before it are
+    superseded, so the queue holds one statement rather than their sum.
 
     The feature snapshot is written once and never recomputed — training on
     features rebuilt later would leak the future into the model.
     """
+    # A caller that named no day and opened no run is not making a statement
+    # about a scored day, so there is nothing to supersede and no run to
+    # attribute the alerts to.
+    if run is None and as_of is not None:
+        run = open_run(session, as_of=as_of, triggered_by="score_and_rank")
+    if run is not None:
+        supersede_previous_runs(session, as_of=run.as_of, keep=run.id)
+
     # Ties broken on merchant then detector so two runs over the same data
     # produce the same ranks. Sorting on score alone leaves equal-scoring hits
     # in whatever order the query returned them, which makes `rank` — a column
@@ -1214,12 +1471,21 @@ def score_and_rank(
         alert = Alert(
             merchant_id=h["merchant_id"],
             as_of=as_of,
+            run_id=run.id if run is not None else None,
             lane=h["lane"],
             blended_score=h["sub_score"],
             rank=rank,
             triggering_detectors=[detector_hit],
             feature_snapshot=[h["feature"]] if h.get("feature") else [],
+            # Cached at write time so the queue filters and counts in SQL.
+            # Derived from the same map the badge on the row uses, so the
+            # column cannot come to mean something the analyst does not see.
+            alert_type=alert_type_for(h["detector"]),
         )
         session.add(alert)
         alerts.append(alert)
+
+    if run is not None:
+        run.alert_count = len(alerts)
+        run.finished_at = utcnow()
     return alerts
